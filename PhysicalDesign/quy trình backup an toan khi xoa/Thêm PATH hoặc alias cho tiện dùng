@@ -1,0 +1,8 @@
+# Thêm vào ~/.bashrc (hoặc ~/.zshrc)
+echo 'export PATH="$HOME/safe-delete/scripts:$PATH"' >> ~/.bashrc
+
+# (tuỳ chọn) thay thế rm bằng script an toàn
+echo 'alias rm="safe_rm.sh"' >> ~/.bashrc
+
+# Áp dụng ngay
+source ~/.bashrc

@@ -1,0 +1,8 @@
+# 1.1. Khai báo biến gốc
+BASE="$HOME/safe-delete"
+
+# 1.2. Tạo cấu trúc
+mkdir -p "$BASE"/{scripts,backups,logs,tmp}
+
+# (tuỳ chọn) kiểm tra
+tree -L 2 "$BASE" 2>/dev/null || find "$BASE" -maxdepth 2 -type d

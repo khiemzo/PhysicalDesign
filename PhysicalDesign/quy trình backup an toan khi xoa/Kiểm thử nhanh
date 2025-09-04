@@ -1,0 +1,15 @@
+# Tạo dữ liệu mẫu
+mkdir -p ~/demo/testdir && echo "abc" > ~/demo/testdir/a.txt
+dd if=/dev/urandom of=~/demo/data.bin bs=1M count=1 status=none
+
+# Chạy xoá an toàn (có xác nhận)
+safe_rm.sh ~/demo/testdir ~/demo/data.bin
+
+# Kiểm tra backup & log
+ls -lh ~/safe-delete/backups
+tail -n 5 ~/safe-delete/logs/backup.log
+
+# Thử khôi phục
+ARCH=$(ls -1t ~/safe-delete/backups/*_backup_*.tar.gz | head -1)
+safe_restore.sh --list "$ARCH"
+mkdir -p ~/restore && safe_restore.sh --to ~/restore "$ARCH"

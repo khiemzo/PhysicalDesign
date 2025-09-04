@@ -1,0 +1,52 @@
+cat > "$BASE/scripts/safe_restore.sh" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [--list] [--to <dir>] <archive.tar.gz>
+
+  --list       Chỉ liệt kê nội dung archive và in INFO.txt
+  --to <dir>   Thư mục đích để giải nén (mặc định: thư mục hiện tại)
+
+Ví dụ:
+  safe_restore.sh ~/safe-delete/backups/testdir_backup_20250904_123000.tar.gz
+USAGE
+}
+
+LIST_ONLY=false
+TARGET_DIR="."
+
+while (( "$#" )); do
+  case "$1" in
+    --list) LIST_ONLY=true; shift ;;
+    --to) TARGET_DIR="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) ARCHIVE="$1"; shift ;;
+  esac
+done
+
+[[ -n "${ARCHIVE:-}" ]] || { usage; exit 1; }
+[[ -f "$ARCHIVE" ]] || { echo "Không tìm thấy: $ARCHIVE" >&2; exit 1; }
+
+echo "==> Nội dung archive:"
+tar -tzf "$ARCHIVE" || { echo "Không đọc được archive." >&2; exit 1; }
+
+# In INFO.txt nếu có
+if tar -tzf "$ARCHIVE" | grep -q '^INFO\.txt$'; then
+  echo
+  echo "==> INFO.txt:"
+  tar -xOzf "$ARCHIVE" INFO.txt || true
+fi
+
+$LIST_ONLY && exit 0
+
+mkdir -p "$TARGET_DIR"
+echo
+echo "==> Giải nén về: $TARGET_DIR"
+tar -xzf "$ARCHIVE" -C "$TARGET_DIR"
+echo "✔ Hoàn tất."
+EOF
+
+chmod +x "$BASE/scripts/safe_restore.sh"

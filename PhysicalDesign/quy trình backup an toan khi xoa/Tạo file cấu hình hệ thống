@@ -1,0 +1,21 @@
+cat > "$BASE/config.env" <<'EOF'
+# === cấu hình safe-delete ===
+BACKUP_DIR="$HOME/safe-delete/backups"
+LOG_FILE="$HOME/safe-delete/logs/backup.log"
+
+# Số ngày giữ file backup trước khi dọn
+RETENTION_DAYS=30
+
+# Hỏi lý do xoá? (true/false)
+ASK_REASON=true
+
+# Đẩy bản backup lên remote? (để trống nếu không dùng)
+# Ví dụ: "user@server:/data/backup/safe-delete"
+REMOTE_TARGET=""
+
+# Cách đẩy: rsync hoặc scp
+REMOTE_CMD="rsync"
+
+# Giới hạn kích thước (MB) để tạo checksum SHA256 cho file đơn (0 = tắt)
+CHECKSUM_MB=50
+EOF

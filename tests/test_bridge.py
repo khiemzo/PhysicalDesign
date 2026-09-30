@@ -453,6 +453,94 @@ class T(unittest.TestCase):
         self.e.run(self.b)
         self.assertNotIn("CÂU HỎI CŨ LIÊN QUAN", self.e.calls()[-1]["prompt"])
 
+    def test_25_stall_killed_and_retried(self):
+        self.b.cfg["stall_minutes"] = 0.05          # 3 giây cho test
+        self.e.script("hang", "ok")
+        self.e.ask("q.md", "Câu hỏi")
+        t0 = time.time()
+        self.e.run(self.b, 2)
+        self.assertLess(time.time() - t0, 15, "phải dừng lượt treo nhanh")
+        self.assertIn("treo", self.b.last_error)
+        self.b.state.sub("retry")["Q001"]["next"] = 0
+        self.e.run(self.b)
+        self.assertIn("status=done", self.ans())
+        self.assertIn("stream-json", self.e.calls()[0]["args"])
+
+    def test_26_progress_and_status_file(self):
+        self.e.script("slow_ok")
+        seen = []
+        orig = self.b.write_placeholder
+
+        def spy(*a, **k):
+            seen.append(a[5])
+            return orig(*a, **k)
+        self.b.write_placeholder = spy
+        self.b.runner_progress_every = 0
+        self.e.ask("q.md", "Câu hỏi")
+        self.e.run(self.b)
+        self.assertIn("status=done", self.ans())
+        self.b.write_status(force=True)
+        st = (self.e.q / "_TRANG_THAI.md").read_text(encoding="utf-8")
+        self.assertIn("đã đăng nhập", st)
+        self.assertIn("Nhật ký gần nhất", st)
+        self.e.ask("q2.md", "Câu hỏi 2")
+        self.e.run(self.b)
+        self.assertFalse((self.e.q / "Q003__TRANG_THAI.md").exists(), "file trạng thái không bị coi là câu hỏi")
+
+    def test_27_preflight_error_written_to_answer(self):
+        self.e.auth({"loggedIn": False})
+        self.e.ask("q.md", "Câu hỏi")
+        self.e.run(self.b)
+        a = self.ans()
+        self.assertIn("CHƯA ĐĂNG NHẬP", a)
+        self.assertIn("claude auth login", a)
+        self.assertIn("CHƯA ĐĂNG NHẬP", (self.e.q / "_TRANG_THAI.md").read_text(encoding="utf-8"))
+
+    def test_28_old_cli_compat(self):
+        self.e.script("old_cli", "old_cli")
+        self.e.ask("q.md", "Câu hỏi")
+        self.e.run(self.b)
+        self.assertIn("status=done", self.ans())
+        self.assertNotIn("--tools", self.e.calls()[-1]["args"])
+
+    def test_29_answer_written_wrong_place(self):
+        self.e.script("wrong_place")
+        self.e.ask("q.md", "Câu hỏi")
+        self.e.run(self.b)
+        self.assertIn("Ghi nhầm chỗ", self.ans())
+
+    def test_30_forgot_to_write_file_resumed(self):
+        self.e.script("no_file", "no_file")
+        self.e.ask("q.md", "Câu hỏi")
+        self.e.run(self.b)
+        self.assertIn("Ghi sau khi được nhắc", self.ans())
+        self.assertTrue(self.e.calls()[-1]["resume"])
+
+    def test_31_internal_exception_not_stuck(self):
+        def boom(*a, **k):
+            raise RuntimeError("lỗi giả lập")
+        self.b.build_prompt = boom
+        self.e.ask("q.md", "Câu hỏi")
+        for _ in range(4):
+            self.e.run(self.b, 1)
+            rt = self.b.state.sub("retry").get("Q001")
+            if rt:
+                rt["next"] = 0
+        a = self.ans()
+        self.assertIn("status=error", a)
+        self.assertIn("lỗi giả lập", a)
+
+    def test_32_transient_errors_retry_more(self):
+        self.e.script(*(["hang"] * 4 + ["ok"]))
+        self.b.cfg["stall_minutes"] = 0.03
+        self.e.ask("q.md", "Câu hỏi")
+        for _ in range(6):
+            self.e.run(self.b, 1)
+            rt = self.b.state.sub("retry").get("Q001")
+            if rt:
+                rt["next"] = 0
+        self.assertIn("status=done", self.ans())
+
 
 class TWatch(unittest.TestCase):
     """Chạy watcher thật (process riêng) — kiểm tra phát hiện file mới + dừng."""

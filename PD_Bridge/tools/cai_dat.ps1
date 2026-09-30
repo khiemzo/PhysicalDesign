@@ -278,8 +278,8 @@ $registered = $false
 try {
     $action = New-ScheduledTaskAction -Execute $psExe -Argument $arg
     $triggers = @(New-ScheduledTaskTrigger -AtLogOn -User $user)
-    try {   # chạy lại mỗi 15 phút nếu watcher bị tắt (IgnoreNew: không chạy trùng)
-        $rep = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 15)
+    try {   # chạy lại mỗi 5 phút nếu watcher bị tắt (IgnoreNew: không chạy trùng)
+        $rep = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
         $triggers += $rep
     } catch {}
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `

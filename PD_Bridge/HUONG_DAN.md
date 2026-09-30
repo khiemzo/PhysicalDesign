@@ -128,6 +128,9 @@ Chỉ mục tìm kiếm nằm ở `D:\K\K\physical design\.pd_index\index.db`. N
 
 | Hiện tượng | Cách xử lý |
 |---|---|
+| File trả lời đứng ở "⏳ Đang xử lý" | Xem file: tiến độ cập nhật mỗi 10 giây (thời gian, số bước, 5 bước gần nhất). Nếu Claude im lặng quá **5 phút**, watcher tự dừng lượt đó và chạy lại (tối đa 8 lần, rồi báo lỗi rõ ràng) |
+| Muốn biết máy ngoài đang ra sao | Mở `cau_hoi/_TRANG_THAI.md` (ngay trên OneDrive, cập nhật mỗi phút): đăng nhập Claude, việc đang làm, lỗi gần nhất, nhật ký. Nếu giờ cập nhật đã cũ nghĩa là watcher hoặc máy ngoài đã dừng |
+| "⚠️ Chưa chạy được: … CHƯA ĐĂNG NHẬP" | Trên máy ngoài chạy `claude auth login`. Watcher tự thử lại mỗi 10 phút |
 | Không có câu trả lời sau ~10 phút | Xem `%LOCALAPPDATA%\PD_Bridge\watcher.log`. Kết quả từng lượt (prompt, output) nằm trong thư mục `runs\` cạnh đó |
 | Log ghi "chua dang nhap" | Mở PowerShell, gõ `claude` rồi đăng nhập lại (hoặc `claude auth login`) |
 | Log ghi "Loi (limit)" | Đã hết hạn mức gói. Watcher tự chạy lại khi reset; file trả lời ghi giờ chạy lại |

@@ -29,13 +29,16 @@ if args[:1] == ["--help"]:
     print("  -p, --print  --output-format <format>  --model <model>  --permission-mode <mode>\n"
           "  --allowedTools <tools...>  --disallowedTools <tools...>  --add-dir <directories...>\n"
           "  --effort <level>  --fallback-model <model>  --strict-mcp-config  --resume\n"
-          "  --tools <tools...>  --exclude-dynamic-system-prompt-sections")
+          "  --tools <tools...>  --exclude-dynamic-system-prompt-sections  --verbose")
     sys.exit(0)
 if args[:2] == ["auth", "status"]:
     st = (HOME / "fake_auth.json")
     print(st.read_text() if st.exists() else json.dumps({"loggedIn": True, "authMethod": "claude.ai"}))
     sys.exit(0)
 
+if args[:1] == ["update"]:
+    print("Claude Code is up to date")
+    sys.exit(0)
 prompt = sys.stdin.read()
 model = args[args.index("--model") + 1] if "--model" in args else "?"
 resume = "--resume" in args
@@ -64,6 +67,30 @@ if beh == "limit_opus" and "opus" in model:
 elif beh == "limit_opus":
     beh = "ok"
 
+if "stream-json" in args:      # giả lập sự kiện tool_use của stream-json
+    print(json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Grep", "input": {"pattern": "uncertainty"}}]}}), flush=True)
+if beh == "old_cli" and "--tools" in args:
+    print("error: unknown option '--tools'", file=sys.stderr)
+    sys.exit(1)
+if beh == "old_cli":
+    beh = "ok"
+if beh == "wrong_place":         # ghi câu trả lời nhầm tên file trong run_dir, rồi in ngắn
+    if target:
+        (target.parent / "cau_tra_loi.md").write_text("## Tóm tắt\n\n" + "Ghi nhầm chỗ. " * 40, encoding="utf-8")
+    result("XONG")
+    sys.exit(0)
+if beh == "no_file":             # quên ghi file; lần resume thì ghi
+    if resume and target:
+        target.write_text("## Tóm tắt\n\nGhi sau khi được nhắc. " + "y " * 200, encoding="utf-8")
+    result("XONG")
+    sys.exit(0)
+if beh == "hang":
+    time.sleep(30)
+    sys.exit(0)
+if beh == "slow_ok":
+    time.sleep(1.5)
+    beh = "ok"
 if beh == "ok":
     q = re.search(r"<<<\n(.*?)\n>>>", prompt, re.S)
     body = ("## Tóm tắt\n\nUncertainty sau CTS nên giảm phần skew, giữ jitter + margin. "

@@ -36,6 +36,17 @@ try {
     [void][PDB.Power]::SetThreadExecutionState([uint32]2147483649)
 } catch { Write-Log "Không đặt được chế độ chống ngủ: $_" }
 
+function Write-Status([string]$cfgDir, [string]$msg) {
+    # ghi lỗi ra OneDrive để người hỏi thấy từ xa (khi python không chạy được)
+    if (-not $cfgDir) { return }
+    $f = Join-Path $cfgDir 'cau_hoi\_TRANG_THAI.md'
+    $tail = ''
+    try { $tail = (Get-Content $LogFile -Tail 15 -Encoding UTF8) -join "`n" } catch {}
+    $fence = '```'
+    $body = "# Trạng thái PD_Bridge (máy ngoài)`n`n- Cập nhật lúc: **$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')**`n- ❌ $msg`n`n## Nhật ký gần nhất`n$fence`n$tail`n$fence`n"
+    try { [IO.File]::WriteAllText($f, $body, (New-Object Text.UTF8Encoding($false))) } catch {}
+}
+
 function Read-Config {
     $p = Join-Path $HomeDir 'config.json'
     if (Test-Path $p) {
@@ -68,6 +79,7 @@ while ($true) {
     if (-not $bridge -or -not (Test-Path $bridge)) { $bridge = Join-Path $PSScriptRoot 'bridge.py' }
     if (-not $py -or -not (Test-Path $bridge)) {
         Write-Log "Thiếu python ($py) hoặc bridge.py ($bridge) — chạy lại cai_dat.ps1. Thử lại sau 5 phút."
+        if ($cfg) { Write-Status $cfg.bridge_dir "Watcher không chạy được: thiếu Python ($py) hoặc bridge.py — chạy lại cai_dat.ps1 trên máy ngoài." }
         Start-Sleep -Seconds 300
         continue
     }
@@ -87,8 +99,13 @@ while ($true) {
     if ($rc -eq 3) { Write-Log 'bridge.py đã cập nhật — khởi động lại.'; $fail = 0; continue }
     if (((Get-Date) - $t0).TotalMinutes -gt 10) { $fail = 0 }
     $fail++
-    $wait = [Math]::Min(300, 10 * $fail)
+    $wait = [Math]::Min(120, 5 * $fail)
     Write-Log "bridge.py thoát bất thường (rc=$rc) — chạy lại sau $wait giây. Xem bridge_err.log"
+    if ($fail -ge 3 -and $cfg) {
+        $errTail = ''
+        try { $errTail = (Get-Content (Join-Path $HomeDir 'bridge_err.log') -Tail 8 -Encoding UTF8) -join ' | ' } catch {}
+        Write-Status $cfg.bridge_dir "bridge.py lỗi liên tục ($fail lần, rc=$rc): $errTail"
+    }
     Start-Sleep -Seconds $wait
 }
 $mutex.ReleaseMutex()

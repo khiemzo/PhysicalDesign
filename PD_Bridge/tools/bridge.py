@@ -77,11 +77,15 @@ DEFAULTS = {
     "index_refresh_hours": 24,
     "weekly": {"weekday": 4, "time": "16:55"},   # 0=Thứ Hai ... 4=Thứ Sáu
     "allow_api_key": False,      # False: xoá ANTHROPIC_API_KEY khỏi môi trường -> không tốn tiền API
-    "max_attempts": 3,
+    "max_attempts": 3,               # lỗi thật (không rõ nguyên nhân)
+    "max_attempts_transient": 8,     # lỗi mạng/treo/quá tải: thử nhiều hơn, chờ tối đa 10 phút/lần
+    "progress_seconds": 10,          # cập nhật tiến độ vào file trả lời
+    "auto_update_cli": True,         # mỗi ngày chạy `claude update` khi rảnh (0 token)
     "chat_lock_hours": 3,
     "prevent_sleep": True,
     "pre_search_hits": 12,
     "attach_inline_chars": 14000,    # tổng ký tự file đính kèm đưa thẳng vào đề bài
+    "stall_minutes": 5,              # Claude im lặng quá lâu -> coi là treo, chạy lại
 }
 MODEL_NAMES = {"opus", "sonnet", "haiku", "fable"}
 
@@ -503,6 +507,7 @@ class ClaudeRunner:
         self.state = state
         self.exe = find_claude(cfg)
         self._flags: set[str] | None = None
+        self.compat = False          # True: bản claude cũ, chỉ dùng các cờ cơ bản
 
     def flags(self) -> set[str]:
         if self._flags is None:
@@ -548,6 +553,8 @@ class ClaudeRunner:
     def build_cmd(self, model: str, job: str, add_dirs: list[Path], deny_dirs: list[Path],
                   allowed: list[str], resume: str | None = None, max_turns: int | None = None) -> list[str]:
         f = self.flags()
+        if self.compat:
+            f = {"--allowedTools", "--add-dir", "--max-turns", "--output-format"}
         cmd = [self.exe, "-p", "--output-format", "json", "--model", model]
         if "--permission-mode" in f:
             cmd += ["--permission-mode", "dontAsk"]
@@ -583,13 +590,18 @@ class ClaudeRunner:
 
     def run(self, prompt: str, model: str, job: str, cwd: Path, add_dirs: list[Path],
             deny_dirs: list[Path], allowed: list[str], run_dir: Path, tag: str = "",
-            resume: str | None = None, max_turns: int | None = None) -> RunResult:
+            resume: str | None = None, max_turns: int | None = None, on_progress=None) -> RunResult:
         res = RunResult()
         if not self.exe:
             res.kind, res.text = "login", "Không tìm thấy lệnh claude (chưa cài Claude Code)"
             return res
         cmd = self.build_cmd(model, job, add_dirs, deny_dirs, allowed, resume, max_turns)
+        stream = "--verbose" in self.flags() and not self.compat
+        if stream:      # stream-json: theo dõi tiến độ + phát hiện treo (không tốn thêm token)
+            i = cmd.index("json")
+            cmd[i:i + 1] = ["stream-json", "--verbose"]
         timeout = int((self.cfg.get("timeout_min") or {}).get(job, 45)) * 60
+        stall = float(self.cfg.get("stall_minutes", 5)) * 60
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / f"cmd{tag}.txt").write_text(json.dumps(cmd, ensure_ascii=False, indent=1), encoding="utf-8")
         (run_dir / f"prompt{tag}.txt").write_text(prompt, encoding="utf-8")
@@ -605,25 +617,89 @@ class ClaudeRunner:
         except OSError as e:
             res.kind, res.text = "error", f"Không chạy được claude: {e}"
             return res
+        out_lines: list[bytes] = []
+        err_buf: list[bytes] = []
+        prog = {"steps": 0, "last": "", "t_last": now(), "t0": t0, "recent": [], "sid": ""}
+
+        def rd_out():
+            for line in iter(proc.stdout.readline, b""):
+                out_lines.append(line)
+                prog["t_last"] = now()
+                if not prog["sid"] and b'"session_id"' in line[:400]:
+                    m_ = re.search(rb'"session_id"\s*:\s*"([^"]+)"', line)
+                    if m_:
+                        prog["sid"] = m_.group(1).decode()
+                if stream and line.startswith(b"{") and b'"tool_use"' in line:
+                    try:
+                        ev = json.loads(line)
+                        for c in (ev.get("message") or {}).get("content") or []:
+                            if isinstance(c, dict) and c.get("type") == "tool_use":
+                                prog["steps"] += 1
+                                inp = c.get("input") or {}
+                                arg = inp.get("query") or inp.get("pattern") or inp.get("file_path") or \
+                                    inp.get("command") or inp.get("url") or ""
+                                prog["last"] = f"{c.get('name')} {str(arg)[:70]}".strip()
+                                prog["recent"] = (prog["recent"] + [prog["last"]])[-5:]
+                    except Exception:
+                        pass
+
+        def rd_err():
+            for line in iter(proc.stderr.readline, b""):
+                err_buf.append(line)
+
+        th = [threading.Thread(target=rd_out, daemon=True), threading.Thread(target=rd_err, daemon=True)]
+        for t_ in th:
+            t_.start()
         try:
-            out, err = proc.communicate(prompt.encode("utf-8"), timeout=timeout)
-        except subprocess.TimeoutExpired:
-            kill_tree(proc)
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.close()
+        except OSError:
+            pass
+        killed = None
+        last_cb = 0.0
+        while True:
             try:
-                out, err = proc.communicate(timeout=30)
-            except Exception:
-                out, err = b"", b""
-            res.kind, res.text = "timeout", f"Quá thời gian {timeout // 60} phút"
-            (run_dir / f"stdout{tag}.txt").write_bytes(out or b"")
+                proc.wait(timeout=2)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            t = now()
+            if t - t0 > timeout:
+                killed = f"Quá thời gian {timeout // 60} phút"
+            elif stream and t - prog["t_last"] > stall:
+                killed = f"Claude không phản hồi {stall / 60:g} phút (treo)"
+            if killed:
+                kill_tree(proc)
+                try:
+                    proc.wait(timeout=30)
+                except Exception:
+                    pass
+                break
+            if on_progress and t - last_cb >= float(self.cfg.get("progress_seconds", 10)):
+                last_cb = t
+                try:
+                    on_progress(dict(prog))
+                except Exception:
+                    pass
+        for t_ in th:
+            t_.join(timeout=5)
+        out_s = b"".join(out_lines).decode("utf-8", errors="replace")
+        err_s = b"".join(err_buf).decode("utf-8", errors="replace")
+        res.session_id = prog["sid"]
+        if killed:
+            (run_dir / f"stdout{tag}.txt").write_text(out_s, encoding="utf-8")
+            res.kind, res.text = "timeout", killed + (f" — bước cuối: {prog['last']}" if prog["last"] else "")
+            log.warning("   claude %s: %s", job, res.text)
             return res
-        out_s = (out or b"").decode("utf-8", errors="replace")
-        err_s = (err or b"").decode("utf-8", errors="replace")
         (run_dir / f"stdout{tag}.json").write_text(out_s, encoding="utf-8")
         if err_s.strip():
             (run_dir / f"stderr{tag}.txt").write_text(err_s, encoding="utf-8")
         res.raw = out_s
         data = None
-        for cand in (out_s.strip(), out_s.strip().splitlines()[-1] if out_s.strip() else ""):
+        lines_ = out_s.strip().splitlines()
+        cands = [out_s.strip()] + [l for l in reversed(lines_) if '"type":"result"' in l.replace(" ", "")][:1] \
+            + lines_[-1:]
+        for cand in cands:
             try:
                 data = json.loads(cand)
                 break
@@ -657,7 +733,17 @@ class ClaudeRunner:
                 res.ok, res.kind, res.text = True, "ok", out_s
         if res.kind == "limit":
             res.reset_at = parse_reset(res.text + "\n" + err_s)
-        log.info("   claude %s model=%s -> %s (%d lượt, %.0fs)", job, model, res.kind, res.num_turns, now() - t0)
+        if not res.ok and not self.compat and re.search(
+                r"unknown option|unknown argument|error: option|invalid (choice|value|argument)|"
+                r"unrecognized|not a valid", err_s + res.text, re.I) and now() - t0 < 60:
+            log.warning("   CLI không nhận một số tuỳ chọn — chạy lại ở chế độ tương thích (%s)", err_s.strip()[:200])
+            self.compat = True
+            return self.run(prompt, model, job, cwd, add_dirs, deny_dirs, allowed, run_dir, tag + "_compat",
+                            resume, max_turns, on_progress)
+        if not res.ok:
+            res.text = res.text or err_s.strip()[-1500:]
+        log.info("   claude %s model=%s -> %s (%d lượt, %.0fs)%s", job, model, res.kind, res.num_turns, now() - t0,
+                 "" if res.ok else " | " + res.text[:300].replace("\n", " "))
         return res
 
 
@@ -687,6 +773,11 @@ class Bridge:
         self.index_proc: subprocess.Popen | None = None
         self.last_house = 0.0
         self.code_mtime = self._code_mtime()
+        self.cur_job: dict | None = None
+        self.progress: dict = {}
+        self.last_status = 0.0
+        self.last_error = ""
+        self.auth_cache: tuple[float, dict] = (0.0, {})
 
     # ------------------------------------------------------------------ paths
     def db_path(self) -> Path | None:
@@ -1279,6 +1370,8 @@ class Bridge:
             self.write_placeholder(qid, stem, mode, v, "running", "⏳ Đang được trả lời trong chat…")
             info["prompt"] = prompt
             return info
+        self.cur_job = {"qid": qid, "stem": stem, "v": v}
+        self.progress = {}
         self.write_placeholder(qid, stem, mode, v, "running",
                                f"⏳ Đang xử lý (mode {mode}, model {model_short(model)}) — bắt đầu {ts_str(fmt='%H:%M')}.")
         log.info("%s: bắt đầu (mode %s, model %s, v%d)", qid, mode, model, v)
@@ -1312,24 +1405,58 @@ class Bridge:
                     if d and Path(d).exists()]
         deny = [self.data_dir] if self.data_dir else []
         allowed = self.allowed_tools(web=True)
-        res = self.runner.run(prompt, model, job, cwd, add_dirs, deny, allowed, run_dir)
+        cur = self.cur_job or {}
+
+        def progress(pg):
+            self.progress = pg
+            if not cur:
+                return
+            el = int(now() - pg["t0"])
+            steps = "\n".join(f"- `{x}`" for x in pg.get("recent") or []) or "- _đang đọc câu hỏi và suy nghĩ…_"
+            self.write_placeholder(cur["qid"], cur["stem"], mode, cur["v"], "running",
+                                   f"⏳ Đang xử lý (mode {mode}, model {model_short(model)}) — {el // 60} phút {el % 60:02d} giây, "
+                                   f"{pg['steps']} bước nghiên cứu.\n\nCác bước gần nhất:\n{steps}\n\n"
+                                   f"_Tự cập nhật mỗi {int(float(self.cfg.get('progress_seconds', 10)))} giây. "
+                                   f"Nếu Claude im lặng quá {self.cfg.get('stall_minutes', 5)} phút, hệ thống tự chạy lại._")
+
+        res = self.runner.run(prompt, model, job, cwd, add_dirs, deny, allowed, run_dir, on_progress=progress)
         fb = self.cfg["models"].get("fallback", "sonnet")
         if res.kind == "limit" and model_short(model) != model_short(fb):
             log.warning("   hết hạn mức %s -> chuyển %s", model_short(model), fb)
-            res = self.runner.run(prompt, fb, job, cwd, add_dirs, deny, allowed, run_dir, tag="_fb")
+            res = self.runner.run(prompt, fb, job, cwd, add_dirs, deny, allowed, run_dir, tag="_fb",
+                                  on_progress=progress)
             res.model = res.model or fb
-        if res.kind == "max_turns" and not self.answer_ok(answer_tmp) and res.session_id:
-            log.info("   hết số lượt -> yêu cầu viết câu trả lời với thông tin đã có")
-            fin = ("Bạn đã dùng hết số lượt nghiên cứu. Hãy viết NGAY câu trả lời hoàn chỉnh nhất có thể "
+        self.rescue_answer(answer_tmp, run_dir)
+        if res.kind in ("max_turns", "ok", "timeout") and not self.answer_ok(answer_tmp) and res.session_id \
+                and not (res.ok and len(res.text.strip()) >= 400):
+            log.info("   chưa có file trả lời (%s) -> yêu cầu viết câu trả lời với thông tin đã có", res.kind)
+            fin = ("Bạn đã dừng mà chưa ghi file trả lời. Hãy viết NGAY câu trả lời hoàn chỉnh nhất có thể "
                    "với thông tin đã thu thập (bắt đầu bằng '## Tóm tắt', ghi rõ phần nào chưa kịp kiểm chứng) "
                    f"vào file: {answer_tmp}\nCuối cùng in: XONG")
             res2 = self.runner.run(fin, res.model or model, job, cwd, add_dirs, deny, ["Write", "Edit", "Read"],
                                    run_dir, tag="_fin", resume=res.session_id, max_turns=8)
-            if res2.ok or self.answer_ok(answer_tmp):
-                res2.ok, res2.kind = True, "ok"
+            self.rescue_answer(answer_tmp, run_dir)
+            if self.answer_ok(answer_tmp):
+                res2.ok, res2.kind = True, "ok" if res.kind != "max_turns" else "max_turns"
                 res2.model = res2.model or res.model
                 return res2
         return res
+
+    def rescue_answer(self, answer_tmp: Path, run_dir: Path) -> None:
+        """Claude ghi nhầm chỗ (file .md khác trong run_dir, hoặc thẳng vào Qnnn_traloi.md) -> lấy lại."""
+        if self.answer_ok(answer_tmp):
+            return
+        cands = [f for f in run_dir.glob("*.md") if f.name != answer_tmp.name]
+        cur = self.cur_job or {}
+        if cur:
+            a = self.qdir / f"{cur['qid']}_traloi.md"
+            if a.exists() and "pd_bridge" not in read_text(a)[-400:]:
+                cands.append(a)
+        for f in sorted(cands, key=lambda f: -f.stat().st_size):
+            if self.answer_ok(f):
+                answer_tmp.write_text(read_text(f), encoding="utf-8")
+                log.info("   lấy câu trả lời từ %s", f)
+                return
 
     @staticmethod
     def answer_ok(p: Path) -> bool:
@@ -1373,10 +1500,13 @@ class Bridge:
             rt = retry.setdefault(qid, {"n": 0})
             rt["n"] += 1
             n = rt["n"]
-            rt["next"] = now() + (120 if res.kind == "transient" else 300) * n
+            rt["next"] = now() + min(600, (15 if res.kind == "timeout" else 60 if res.kind == "transient" else 300) * n)
             self.state.save()
         log.error("%s: thất bại (%s, lần %d): %s", qid, res.kind, n, res.text[:300])
-        if n >= int(self.cfg.get("max_attempts", 3)):
+        self.last_error = f"{qid}: {res.kind} — {res.text[:200]}"
+        limit_n = int(self.cfg.get("max_attempts_transient" if res.kind in ("timeout", "transient")
+                                   else "max_attempts", 3))
+        if n >= limit_n:
             body = (f"## Tóm tắt\n\n❌ Không tạo được câu trả lời sau {n} lần thử ({res.kind}).\n\n"
                     f"Chi tiết lỗi:\n\n```\n{res.text[:1500]}\n```\n\n"
                     f"Xem log: `{self.home / 'watcher.log'}` và `{info['run_dir']}`.\n"
@@ -1553,10 +1683,29 @@ class Bridge:
             aliases.pop(k, None)
         self.state.save()
 
+    def update_cli(self) -> None:
+        if not self.cfg.get("auto_update_cli", True) or not self.runner.exe or self.busy():
+            return
+        if now() - float(self.state.get("cli_update_last", 0)) < 86400:
+            return
+        self.state.set("cli_update_last", now())
+        if self.busy():
+            return
+        try:
+            r = subprocess.run([self.runner.exe, "update"], capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL,
+                               encoding="utf-8", errors="replace", env=child_env(self.cfg),
+                               creationflags=CREATE_NO_WINDOW)
+            log.info("claude update: %s", (r.stdout + r.stderr).strip().splitlines()[-1:] or "-")
+            self.runner._flags = None
+            self.runner.compat = False
+        except Exception as e:  # noqa: BLE001
+            log.warning("claude update lỗi: %s", e)
+
     def housekeeping(self, force: bool = False) -> None:
         if not force and now() - self.last_house < 3600:
             return
         self.last_house = now()
+        threading.Thread(target=self.update_cli, daemon=True).start()   # nền: không chặn việc nhận câu hỏi
         try:
             self.purge_trash()
             self.prune_runs()
@@ -1729,10 +1878,49 @@ class Bridge:
     def _work(self, fn, *args):
         try:
             fn(*args)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.exception("Lỗi khi xử lý %s", args)
+            self.last_error = f"lỗi nội bộ: {e}"
+            qid = args[0] if args and isinstance(args[0], str) and re.match(r"^Q\d{3,}$", args[0]) else None
+            if qid:
+                self.internal_failure(qid, e)
         finally:
             self.active = None
+            self.cur_job = None
+
+    def internal_failure(self, qid: str, e: Exception) -> None:
+        """Lỗi trong code (không phải Claude): thử lại vài lần, sau đó ghi lỗi rõ ràng thay vì treo."""
+        retry = self.state.sub("retry")
+        with self.state.lock:
+            rt = retry.setdefault(qid, {"n": 0})
+            rt["n"] += 1
+            rt["next"] = now() + 60 * rt["n"]
+            n = rt["n"]
+            self.state.save()
+        try:
+            _, rounds = self.scan()
+            r = rounds.get(qid, {})
+            qf = r.get("q")
+            if not qf:
+                return
+            stem = Q_RX.match(qf.name).group(2)
+            txt = read_text(qf)
+            mode, _ = self.resolve_mode(stem, txt)
+            mk = parse_marker(read_text(r["a"])) if r.get("a") else {}
+            v = int(mk.get("v", 1))
+            if n >= int(self.cfg.get("max_attempts", 3)):
+                info = {"qid": qid, "stem": stem, "mode": mode, "v": v, "hash": text_hash(txt),
+                        "question": parse_mode(txt, "")[1], "run_dir": str(self.runs), "started": now()}
+                self.finalize(info, f"## Tóm tắt\n\n❌ Lỗi nội bộ PD_Bridge sau {n} lần thử: `{e}`\n\n"
+                                    f"Xem `{self.home / 'watcher.log'}`. Sửa/thêm một dòng trong câu hỏi để thử lại.",
+                              "?", " · ❌ lỗi", status="error")
+                retry.pop(qid, None)
+                self.state.save()
+            else:
+                self.write_placeholder(qid, stem, mode, v, "waiting",
+                                       f"⚠️ Lỗi nội bộ lần {n} (`{str(e)[:150]}`) — tự thử lại sau {n} phút.")
+        except Exception:  # noqa: BLE001
+            log.exception("internal_failure")
 
     def start_worker(self, name: str, fn, *args) -> None:
         self.active = name
@@ -1763,6 +1951,19 @@ class Bridge:
                 self.state.set("paused_until", now() + 10 * 60)
                 self.state.set("pause_reason", why)
                 log.error("Loi: %s — thử lại sau 10 phút", why)
+                self.last_error = why
+                fix = {"chua cai claude": "Máy ngoài chưa có Claude Code (hoặc watcher không tìm thấy lệnh `claude`). "
+                                          "Chạy lại `cai_dat.ps1` trên máy ngoài.",
+                       "chua dang nhap": "Claude Code trên máy ngoài CHƯA ĐĂNG NHẬP. Trên máy ngoài mở PowerShell, "
+                                         "gõ `claude auth login` và đăng nhập tài khoản Claude."}.get(why, why)
+                for qid, _ in jobs:
+                    r = rounds[qid]
+                    stem = Q_RX.match(r["q"].name).group(2)
+                    mode, _ = self.resolve_mode(stem, read_text(r["q"]))
+                    mk = parse_marker(read_text(r["a"])) if r.get("a") else {}
+                    self.write_placeholder(qid, stem, mode, int(mk.get("v", 1)), "waiting",
+                                           f"⚠️ Chưa chạy được: {fix}\n\nWatcher tự thử lại mỗi 10 phút.")
+                self.write_status(force=True)
                 return
             qid, kind = jobs[0]
             if block:
@@ -1780,6 +1981,46 @@ class Bridge:
             else:
                 self.start_worker("weekly", self.weekly)
 
+    def write_status(self, force: bool = False) -> None:
+        """cau_hoi/_TRANG_THAI.md: tình trạng máy ngoài, xem được từ OneDrive (0 token)."""
+        if not force and now() - self.last_status < 60:
+            return
+        self.last_status = now()
+        t, auth = self.auth_cache
+        if self.cfg.get("runner") != "routine" and self.runner.exe and (force or now() - t > 600):
+            auth = self.runner.auth_status()
+            self.auth_cache = (now(), auth)
+        pu = float(self.state.get("paused_until", 0))
+        pg = self.progress if self.busy() and self.progress else {}
+        try:
+            tail = (self.home / "watcher.log").read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
+        except OSError:
+            tail = []
+        if auth.get("loggedIn"):
+            auth_s = f"đã đăng nhập ({auth.get('authMethod', '')})"
+        elif auth:
+            auth_s = "**CHƯA ĐĂNG NHẬP** — trên máy ngoài chạy: `claude auth login`"
+        else:
+            auth_s = "không kiểm tra được"
+        doing = self.active or "-"
+        if pg:
+            doing += f" — {int((now() - pg['t0']) // 60)} phút, {pg['steps']} bước, gần nhất: `{pg['last']}`"
+        lines = [
+            "# Trạng thái PD_Bridge (máy ngoài)", "",
+            f"- Cập nhật lúc: **{ts_str(fmt='%Y-%m-%d %H:%M:%S')}** (ghi mỗi phút; giờ cũ = watcher đã dừng)",
+            f"- Claude Code: `{self.runner.exe or 'KHÔNG THẤY'}` — {auth_s}",
+            f"- Thư mục dữ liệu: `{self.data_dir}` " +
+            ("✅" if self.data_dir and self.data_dir.is_dir() else "❌ không thấy"),
+            f"- Đang làm: {doing}",
+            (f"- Tạm dừng đến {ts_str(pu)} ({self.state.get('pause_reason')})" if pu > now() else "- Tạm dừng: không"),
+            f"- Lỗi gần nhất: {self.last_error or '-'}",
+            "", "## Nhật ký gần nhất", "```", *tail, "```", "",
+        ]
+        try:
+            atomic_write(self.qdir / "_TRANG_THAI.md", "\n".join(lines))
+        except OSError:
+            pass
+
     def watch(self) -> int:
         lock = SingleInstance(self.home / "watcher.lock")
         if not lock.acquire():
@@ -1795,8 +2036,10 @@ class Bridge:
         while True:
             try:
                 self.tick()
-            except Exception:  # noqa: BLE001
+                self.write_status()
+            except Exception as e:  # noqa: BLE001
                 log.exception("tick lỗi")
+                self.last_error = f"tick lỗi: {e}"
             if stop.exists() and not self.busy():
                 stop.unlink(missing_ok=True)
                 log.info("Nhận yêu cầu dừng — thoát")

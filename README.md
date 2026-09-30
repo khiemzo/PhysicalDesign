@@ -2,7 +2,7 @@
 
 ## PD_Bridge — hỏi đáp Physical Design tự động
 
-Thư mục [`PD_Bridge/`](PD_Bridge/): bạn thả file câu hỏi vào `cau_hoi/` (OneDrive Alchip).
+Thư mục [`PD_Bridge/`](PD_Bridge/): bạn thả file câu hỏi vào `cau_hoi/` (OneDrive khuongmat456@gmail.com).
 Watcher trên máy ngoài phát hiện file mới (0 token), gọi Claude Code tra dữ liệu trong
 thư mục **physical design** và research web, rồi ghi `Qnnn_traloi.md` vào cùng thư mục.
 

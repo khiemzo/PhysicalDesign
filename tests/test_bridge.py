@@ -412,6 +412,47 @@ class T(unittest.TestCase):
         self.assertTrue((self.e.root / "du_lieu_gui" / "Q001_hold" / "hold_innovus.log").exists())
         self.assertIn("IMPCCOPT-1209", self.e.calls()[0]["prompt"])
 
+    def test_23_memory_history_and_sent_data(self):
+        d = self.e.q / "hold median"
+        d.mkdir()
+        (d / "cau hoi.md").write_text("Vì sao hold median_filter âm sau CTS? xem report", encoding="utf-8")
+        shutil.copy(self.e.data / "median_filter" / "rpt" / "postcts_hold" / "median_filter_postCTS_hold.tarpt",
+                    d / "hold_0930.tarpt")
+        t = time.time() - 10
+        for f in [d, *d.iterdir()]:
+            os.utime(f, (t, t))
+        self.e.run(self.b)
+        a = self.ans("Q001").replace("danh_gia: chua", "danh_gia: dung")
+        (self.e.q / "Q001_traloi.md").write_text(a, encoding="utf-8")
+        self.b.refresh_ratings()
+        cat = (self.e.root / "du_lieu_gui" / "MUC_LUC.md").read_text(encoding="utf-8")
+        self.assertIn("hold_0930.tarpt", cat)
+        self.assertIn("WNS", cat)
+        self.e.ask("q2.md", "Hold median_filter sau CTS vẫn âm, so sánh với report tuần trước (VIOLATED reg2reg)")
+        self.e.run(self.b)
+        p = self.e.calls()[-1]["prompt"]
+        self.assertIn("CÂU HỎI CŨ LIÊN QUAN", p)
+        self.assertIn("Q001", p)
+        self.assertIn("✅ đã xác nhận đúng", p)
+        self.assertIn("DỮ LIỆU NGƯỜI HỎI ĐÃ GỬI TRƯỚC ĐÂY", p)
+        self.assertIn("hold_0930.tarpt", p)
+        self.assertIn(str(self.e.root / "du_lieu_gui"), self.e.calls()[-1]["args"])
+        # dọn lượt cũ không xoá dữ liệu đã gửi
+        self.b.cfg["keep_rounds"] = 0
+        _, rounds = self.b.scan()
+        self.b.retention(rounds)
+        self.assertTrue((self.e.root / "du_lieu_gui" / "Q001_hold median" / "hold_0930.tarpt").exists())
+
+    def test_24_wrong_answers_not_reused(self):
+        self.e.ask("q.md", "clock gating check setup hold ICG")
+        self.e.run(self.b)
+        a = self.ans().replace("danh_gia: chua", "danh_gia: sai")
+        (self.e.q / "Q001_traloi.md").write_text(a, encoding="utf-8")
+        self.b.refresh_ratings()
+        self.e.ask("q2.md", "clock gating check ICG setup hold là gì")
+        self.e.run(self.b)
+        self.assertNotIn("CÂU HỎI CŨ LIÊN QUAN", self.e.calls()[-1]["prompt"])
+
 
 class TWatch(unittest.TestCase):
     """Chạy watcher thật (process riêng) — kiểm tra phát hiện file mới + dừng."""

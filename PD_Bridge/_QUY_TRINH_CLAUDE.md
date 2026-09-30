@@ -22,6 +22,9 @@ cau_hoi/[mode] abc.md (hoặc thư mục kèm dữ liệu)  --(ổn định 2s)-
 - `ANTHROPIC_API_KEY` bị gỡ khỏi môi trường của `claude` → luôn dùng gói Claude, không phát sinh tiền API.
 - Giữ 5 lượt mới nhất trong `cau_hoi/`; lượt cũ → `cau_hoi/_cho_xoa/<thời điểm>/`, xoá sau 60 phút.
   Nội dung chính (câu hỏi, tóm tắt, đánh giá) đã ghi vào `tong_hop/nhat_ky.jsonl` trước khi chuyển.
+- Bộ nhớ (0 token): mỗi prompt kèm tối đa 3 câu cũ liên quan từ `tong_hop/nhat_ky.jsonl` (ưu tiên `dung`, bỏ `sai`),
+  kết quả tìm trong dữ liệu đã gửi `du_lieu_gui/` (chỉ mục riêng `%LOCALAPPDATA%\PD_Bridge\.pd_index\du_lieu_gui.db`,
+  mục lục `du_lieu_gui/MUC_LUC.md`) và kiến thức ✅ trong `kien_thuc/`.
 - Chỉ mục `pd_index.py build` chạy nền mỗi 24 giờ (tăng dần theo size/mtime).
 - Tổng hợp tuần: sau thứ Sáu 16:55 (hoặc lần bật máy kế tiếp) — `bridge.py` tính thống kê, gọi Claude
   (Sonnet) viết `tong_hop/<năm>-W<tuần>.md` + cập nhật `kien_thuc/kinh_nghiem.md`. Tuần không có câu hỏi: 0 token.
@@ -52,7 +55,7 @@ Lệnh hữu ích khác: `bridge.py status` (hàng đợi, hạn mức, chỉ m�
 
 | Vị trí | Nội dung |
 |---|---|
-| `<OneDrive - Alchip…>\PD_Bridge\` | câu hỏi/trả lời, tổng hợp, kiến thức, tools (đồng bộ về máy người hỏi) |
+| `<OneDrive khuongmat456@gmail.com>\PD_Bridge\` | câu hỏi/trả lời, tổng hợp, kiến thức, tools (đồng bộ về máy người hỏi) |
 | `%LOCALAPPDATA%\PD_Bridge\config.json` | cấu hình (models, data_dir, runner…) |
 | `%LOCALAPPDATA%\PD_Bridge\watcher.log`, `runs\` | nhật ký, prompt/kết quả từng lượt |
 | `<physical design>\.pd_index\index.db` | chỉ mục SQLite FTS5 |

@@ -1046,6 +1046,92 @@ class Bridge:
             lines.append(f"{i}. [{h['kind']}] {h['path']}{loc}{snip}")
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------ bộ nhớ dữ liệu đã gửi (0 token)
+    def gui_db(self) -> Path:
+        return self.home / ".pd_index" / "du_lieu_gui.db"
+
+    def remember_data(self, qid: str | None = None) -> None:
+        """Đánh chỉ mục du_lieu_gui/ (tăng dần, nhanh) + cập nhật mục lục MUC_LUC.md."""
+        if not self.gui.is_dir():
+            return
+        try:
+            pd_index.build(self.gui, self.gui_db())
+        except BaseException as e:  # noqa: BLE001
+            log.warning("Chỉ mục du_lieu_gui lỗi: %s", e)
+        d = self.attachments_dir(qid) if qid else None
+        if not d:
+            return
+        cat = self.gui / "MUC_LUC.md"
+        if cat.exists() and f"## {d.name}" in read_text(cat):
+            return
+        qf = next(self.qdir.glob(f"{qid}_*.md"), None)
+        topic = ""
+        if qf and not ANS_RX.match(qf.name):
+            topic = norm_text(parse_mode(read_text(qf), "")[1]).split("\n")[0][:160]
+        lines = [f"\n## {d.name} ({ts_str(fmt='%Y-%m-%d')})", f"Câu hỏi: {topic}"]
+        for f in sorted(d.rglob("*")):
+            if f.is_file():
+                try:
+                    info = pd_summarize.one_line(f) if not pd_index.looks_binary(f.read_bytes()[:4096]) else "nhị phân"
+                except Exception:  # noqa: BLE001
+                    info = "-"
+                lines.append(f"- `{f.relative_to(self.gui).as_posix()}` ({pd_summarize.human(f.stat().st_size)}) — {info[:160]}")
+        if not cat.exists():
+            atomic_write(cat, "# Mục lục dữ liệu đã gửi\n\nTự động cập nhật mỗi khi có câu hỏi kèm dữ liệu.\n")
+        with open(cat, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    def search_gui(self, question: str, exclude: Path | None = None, n: int = 6) -> str:
+        db = self.gui_db()
+        if not db.exists():
+            return ""
+        try:
+            hits = pd_index.search(db, question, n=n + 6)
+        except BaseException:  # noqa: BLE001
+            return ""
+        ex = exclude.name + "/" if exclude else None
+        out = []
+        for h in hits:
+            if ex and h["path"].startswith(ex) or h["path"] == "MUC_LUC.md":
+                continue
+            loc = (" [" + ", ".join(h["locs"][:2]) + "]") if h["locs"] else ""
+            snip = (" — " + h["snippet"][:140]) if h["snippet"] else ""
+            out.append(f"- du_lieu_gui/{h['path']}{loc}{snip}")
+            if len(out) >= n:
+                break
+        return "\n".join(out)
+
+    def related_history(self, qid: str, question: str, n: int = 3) -> str:
+        """Câu hỏi cũ liên quan (từ nhat_ky.jsonl): câu hỏi, tóm tắt trả lời, đánh giá, file."""
+        terms = {t.lower() for t in pd_index.extract_terms(question, 20)}
+        if not terms:
+            return ""
+        latest: dict[str, dict] = {}
+        ratings: dict[str, str] = {}
+        for r in self.read_journal():
+            if r.get("type") == "answer" and r.get("q") != qid and r.get("status") == "done":
+                latest[r["q"]] = r
+            elif r.get("type") == "rating":
+                ratings[f"{r['q']}:{r['v']}"] = r.get("danh_gia", "chua")
+        scored = []
+        for q, r in latest.items():
+            blob = (r.get("name", "") + " " + r.get("question", "") + " " + r.get("summary", "")).lower()
+            sc = sum(1 for t in terms if t in blob)
+            rating = ratings.get(f"{q}:{r['v']}", "chua")
+            if sc >= 2 and rating != "sai":
+                scored.append((sc + (2 if rating == "dung" else 0), q, r, rating))
+        scored.sort(key=lambda x: (-x[0], -qnum(x[1])))
+        out = []
+        for _, q, r, rating in scored[:n]:
+            a = self.qdir / f"{q}_traloi.md"
+            mark = {"dung": "✅ đã xác nhận đúng", "mot_phan": "◑ đúng một phần"}.get(rating, "chưa đánh giá")
+            d = self.attachments_dir(q)
+            out.append(f"- {q} ({r.get('ts', '')[:10]}, {mark}) — {r.get('name', '')}\n"
+                       f"  Hỏi: {r.get('question', '')[:220]}\n"
+                       f"  Kết luận: {r.get('summary', '')[:500]}\n"
+                       f"  File: {a if a.exists() else '(đã lưu trữ)'}{' · dữ liệu: ' + str(d) if d else ''}")
+        return "\n".join(out)
+
     def data_layout(self) -> str:
         if not self.data_dir or not self.data_dir.is_dir():
             return "(không thấy thư mục dữ liệu)"
@@ -1072,6 +1158,8 @@ class Bridge:
                      edit: dict | None, raw_mode: str | None) -> str:
         att = self.attachment_context(qid)
         search_text = question + " " + parse_prefix(stem)[2]
+        hist = self.related_history(qid, search_text)
+        gui_hits = self.search_gui(search_text, self.attachments_dir(qid))
         tools = self.tools
         py = Path(self.cfg.get("python") or sys.executable).stem.lower()   # python (Windows) / python3
         if py not in ("python", "python3", "py"):
@@ -1096,6 +1184,11 @@ class Bridge:
             "GỢI Ý TỪ CHỈ MỤC (tự động theo từ khoá câu hỏi, có thể chưa đủ):",
             self.pre_search(search_text),
         ]
+        if hist:
+            parts += ["", "CÂU HỎI CŨ LIÊN QUAN ĐÃ TRẢ LỜI (bộ nhớ — tận dụng, không research lại phần đã chắc chắn):", hist]
+        if gui_hits:
+            parts += ["", f"DỮ LIỆU NGƯỜI HỎI ĐÃ GỬI TRƯỚC ĐÂY có liên quan (thư mục {self.gui}; mục lục: du_lieu_gui/MUC_LUC.md):",
+                      gui_hits]
         if att:
             parts += ["", "DỮ LIỆU NGƯỜI HỎI GỬI KÈM (ưu tiên phân tích; đã tóm tắt sẵn, mở file gốc khi cần chi tiết):", att]
         if bc:
@@ -1150,6 +1243,7 @@ class Bridge:
         mode, model = self.resolve_mode(stem, qtext_raw)
         if not chat:
             self.sweep_attachments(qid)
+        self.remember_data(qid)
         if not question.strip():
             log.info("%s: câu hỏi rỗng — bỏ qua", qid)
             return None
@@ -1214,7 +1308,8 @@ class Bridge:
     def run_with_fallback(self, prompt: str, mode: str, model: str, run_dir: Path, answer_tmp: Path,
                           job: str, extra_dirs: list | None = None) -> RunResult:
         cwd = self.root
-        add_dirs = [d for d in (self.data_dir, run_dir, self.tools, *(extra_dirs or [])) if d and Path(d).exists()]
+        add_dirs = [d for d in (self.data_dir, run_dir, self.tools, self.gui, *(extra_dirs or []))
+                    if d and Path(d).exists()]
         deny = [self.data_dir] if self.data_dir else []
         allowed = self.allowed_tools(web=True)
         res = self.runner.run(prompt, model, job, cwd, add_dirs, deny, allowed, run_dir)
@@ -1769,8 +1864,8 @@ def doctor(cfg: dict) -> int:
     home = home_dir()
     print(f"config: {home / 'config.json'} {'(có)' if (home / 'config.json').exists() else '(CHƯA CÓ — dùng mặc định)'}")
     print(f"PD_Bridge: {cfg['bridge_dir']}")
-    if "onedrive" in cfg["bridge_dir"].lower() and "alchip" not in cfg["bridge_dir"].lower():
-        print("  ! PD_Bridge chưa nằm trong OneDrive Alchip (chạy lại cai_dat.ps1 sau khi thêm tài khoản)")
+    if "onedrive" not in cfg["bridge_dir"].lower():
+        print("  ! PD_Bridge chưa nằm trong thư mục OneDrive — câu trả lời sẽ không được đồng bộ")
     dd = cfg.get("data_dir")
     print(f"Dữ liệu: {dd} {'OK' if dd and Path(dd).is_dir() else '— KHÔNG THẤY'}")
     ok &= bool(dd and Path(dd).is_dir())

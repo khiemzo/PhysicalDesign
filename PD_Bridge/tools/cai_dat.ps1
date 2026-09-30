@@ -4,6 +4,7 @@
     powershell -ExecutionPolicy Bypass -File "C:\Users\khiem\OneDrive\PD_Bridge\tools\cai_dat.ps1"
 
   Tuỳ chọn:
+    -OneDriveAccount <email>            tài khoản OneDrive chứa PD_Bridge (mặc định khuongmat456@gmail.com)
     -DataDir "D:\K\K\physical design"   thư mục dữ liệu (mặc định: giữ cấu hình cũ hoặc D:\K\K\physical design)
     -Yes                                trả lời Y cho mọi câu hỏi
     -Uninstall                          gỡ watcher (giữ nguyên câu hỏi/trả lời/kiến thức)
@@ -15,6 +16,7 @@ param(
     [switch]$Uninstall,
     [ValidateSet('local', 'routine')][string]$Runner = 'local',
     [string]$DataDir = '',
+    [string]$OneDriveAccount = 'khuongmat456@gmail.com',
     [string]$RoutineUrl = '',
     [string]$RoutineToken = '',
     [switch]$Yes,
@@ -83,35 +85,37 @@ if ($Uninstall) {
 Say 'PD_Bridge — cài đặt trên máy ngoài' 'Cyan'
 Say "Nguồn: $SrcRoot"
 
-# =============================================================================== 1. ONEDRIVE ALCHIP
-Step '1. OneDrive Alchip'
-function Find-AlchipOneDrive {
-    $c = @()
+# =============================================================================== 1. ONEDRIVE CÁ NHÂN
+Step "1. OneDrive ($OneDriveAccount)"
+function Find-OneDriveFolder([string]$email) {
+    # 1) tài khoản OneDrive có email đúng; 2) tài khoản Personal; 3) biến môi trường; 4) %USERPROFILE%\OneDrive
+    $acc = @()
     try {
         Get-ChildItem 'HKCU:\Software\Microsoft\OneDrive\Accounts' -ErrorAction Stop | ForEach-Object {
             $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-            if ($p -and $p.UserFolder) {
-                $c += [pscustomobject]@{ Path = $p.UserFolder; Key = "$($p.DisplayName) $($p.UserEmail) $($p.UserFolder)" }
+            if ($p -and $p.UserFolder -and (Test-Path $p.UserFolder)) {
+                $acc += [pscustomobject]@{ Path = $p.UserFolder; Email = "$($p.UserEmail)"; Name = $_.PSChildName }
             }
         }
     } catch {}
-    if ($env:OneDriveCommercial) { $c += [pscustomobject]@{ Path = $env:OneDriveCommercial; Key = $env:OneDriveCommercial } }
-    Get-ChildItem $env:USERPROFILE -Directory -Filter 'OneDrive*' -ErrorAction SilentlyContinue | ForEach-Object {
-        $c += [pscustomobject]@{ Path = $_.FullName; Key = $_.Name }
-    }
-    $hit = $c | Where-Object { $_.Key -match 'alchip' -and (Test-Path $_.Path) } | Select-Object -First 1
+    $hit = $acc | Where-Object { $_.Email -ieq $email } | Select-Object -First 1
     if ($hit) { return $hit.Path }
+    $hit = $acc | Where-Object { $_.Name -eq 'Personal' } | Select-Object -First 1
+    if ($hit) { return $hit.Path }
+    foreach ($v in @($env:OneDriveConsumer, $env:OneDrive, (Join-Path $env:USERPROFILE 'OneDrive'))) {
+        if ($v -and (Test-Path $v) -and ((Split-Path $v -Leaf) -notmatch '^OneDrive - ')) { return $v }
+    }
     return $null
 }
 
 $Bridge = $SrcRoot
-$alchip = Find-AlchipOneDrive
-if ($alchip) {
-    $dest = Join-Path $alchip 'PD_Bridge'
+$od = Find-OneDriveFolder $OneDriveAccount
+if ($od) {
+    $dest = Join-Path $od 'PD_Bridge'
     $srcFull = (Resolve-Path $SrcRoot).Path.TrimEnd('\')
     if ($srcFull -ieq $dest.TrimEnd('\')) {
-        Ok "PD_Bridge đã nằm trong OneDrive Alchip: $dest"
-    } elseif (Ask "Chuyển PD_Bridge sang OneDrive Alchip ($dest)?") {
+        Ok "PD_Bridge đã nằm trong OneDrive: $dest"
+    } elseif (Ask "Chuyển PD_Bridge vào OneDrive $OneDriveAccount ($dest)?") {
         Stop-Watcher
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
         # dữ liệu: không ghi đè file mới hơn ở đích; tools: luôn lấy bản đang cài
@@ -129,8 +133,8 @@ if ($alchip) {
         }
     }
 } else {
-    Warn 'Chưa thấy OneDrive Alchip (chưa thêm tài khoản: OneDrive > Settings > Account > Add an account).'
-    Warn "Tạm dùng: $SrcRoot — chạy lại script này sau khi thêm tài khoản để chuyển sang."
+    Warn "Chưa thấy OneDrive của $OneDriveAccount (đăng nhập ứng dụng OneDrive bằng tài khoản này rồi chạy lại)."
+    Warn "Tạm dùng: $SrcRoot"
 }
 foreach ($d in @('cau_hoi', 'tong_hop', 'kien_thuc', 'du_lieu_gui')) { New-Item -ItemType Directory -Force -Path (Join-Path $Bridge $d) | Out-Null }
 try { & attrib +P -U "$Bridge\*" /S /D 2>$null | Out-Null; & attrib +P -U "$Bridge" 2>$null | Out-Null } catch {}   # luôn giữ trên máy

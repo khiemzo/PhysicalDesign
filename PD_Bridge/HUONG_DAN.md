@@ -4,7 +4,7 @@ Bạn chỉ cần tạo một file câu hỏi. Mọi việc còn lại tự đ�
 
 1. Watcher trên máy ngoài phát hiện file mới. Bước này không tốn token.
 2. Watcher bật Claude Code ngay trên máy đó. Claude tự tìm dữ liệu trong thư mục **physical design** (report, log, script, tài liệu) rồi research thêm trên web.
-3. Câu trả lời `Qnnn_traloi.md` được ghi vào thư mục câu hỏi, rồi OneDrive Alchip đồng bộ về máy bạn.
+3. Câu trả lời `Qnnn_traloi.md` được ghi vào thư mục câu hỏi, rồi OneDrive (tài khoản cá nhân `khuongmat456@gmail.com`) đồng bộ về máy bạn.
 
 ## Cách hỏi
 
@@ -46,6 +46,20 @@ Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết
 
 **Tổng hợp tuần:** sau 16:55 thứ Sáu, Claude viết `tong_hop/<năm>-W<tuần>.md` và cập nhật `kien_thuc/kinh_nghiem.md`. Nếu lúc đó máy tắt thì khi bật lên sẽ làm bù. Tuần không có câu hỏi thì không tốn token.
 
+## Bộ nhớ: hệ thống nhớ dữ liệu và câu trả lời cũ
+
+Mọi việc dưới đây do script chạy, không tốn token. Mỗi câu hỏi mới tự được bổ sung 3 loại "bộ nhớ" vào đề bài:
+
+| Bộ nhớ | Nguồn | Tác dụng |
+|---|---|---|
+| **Câu hỏi cũ liên quan** | `tong_hop/nhat_ky.jsonl` (mọi câu đã trả lời) | Đưa kèm tối đa 3 câu cũ gần nhất về chủ đề: câu hỏi, kết luận, đánh giá. Ưu tiên câu `dung`, bỏ câu `sai`. Claude tận dụng thay vì research lại |
+| **Dữ liệu đã gửi trước đây** | `du_lieu_gui/` (có chỉ mục toàn văn riêng) | Tìm report/log/script bạn từng gửi có liên quan, kèm vị trí và đoạn trích. Ví dụ bạn gửi report hold tuần trước, tuần này hỏi lại thì Claude so sánh được |
+| **Kiến thức đã xác nhận** | `kien_thuc/kinh_nghiem.md` | Điều bạn đánh giá `dung` được đưa vào mỗi khi liên quan |
+
+- `du_lieu_gui/MUC_LUC.md` là mục lục tự động: mỗi lần gửi có danh sách file và một dòng chỉ số chính (WNS/TNS, số ERROR…).
+- Dữ liệu trong `du_lieu_gui/` **không bị xoá** khi dọn lượt cũ. Muốn bỏ dữ liệu nào thì xoá tay.
+- Cách giúp hệ thống nhớ tốt hơn: đánh giá câu trả lời (`danh_gia: dung/mot_phan/sai`), và ghi thông tin dự án vào `kien_thuc/boi_canh_du_an.md`.
+
 ## Tốn token thế nào
 
 - **Khi không có câu hỏi: 0 token.** Việc phát hiện file mới (quét mỗi giây), làm mới chỉ mục tài liệu, dọn file cũ và kiểm tra đăng nhập đều do script trên máy làm.
@@ -65,12 +79,12 @@ Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết
 | Bước | Việc |
 |---|---|
 | 0 | Chép thư mục `PD_Bridge` (trong repo này) vào `C:\Users\khiem\OneDrive\` |
-| 1 | Thêm tài khoản OneDrive **Alchip**: bấm biểu tượng OneDrive → Settings → Account → Add an account, rồi chờ đồng bộ xong |
+| 1 | Trên máy ngoài, đăng nhập ứng dụng OneDrive bằng tài khoản **khuongmat456@gmail.com**, rồi chờ đồng bộ xong |
 | 2 | Mở PowerShell và chạy: `powershell -ExecutionPolicy Bypass -File "C:\Users\khiem\OneDrive\PD_Bridge\tools\cai_dat.ps1"` |
-| 3 | Trả lời **Y** các câu script hỏi: chuyển PD_Bridge sang OneDrive Alchip, cài Python / Git / Claude Code nếu thiếu. Trình duyệt sẽ mở để bạn đăng nhập Claude (tài khoản Pro của bạn) |
+| 3 | Trả lời **Y** các câu script hỏi: chuyển PD_Bridge vào OneDrive của khuongmat456@gmail.com (nếu đang ở chỗ khác), cài Python / Git / Claude Code nếu thiếu. Trình duyệt sẽ mở để bạn đăng nhập Claude (tài khoản Pro của bạn) |
 | 4 | Để máy bật và đăng nhập Windows. Script hỏi có đặt "gập nắp khi cắm sạc thì không ngủ" hay không; watcher cũng tự chặn máy ngủ |
 
-- Script tự tìm thư mục `OneDrive - Alchip…`. Nếu chưa thấy (chưa làm bước 1), PD_Bridge tạm ở OneDrive cá nhân; chạy lại script sau khi thêm tài khoản.
+- Script tự tìm thư mục OneDrive của tài khoản `khuongmat456@gmail.com` (thường là `C:\Users\<tên>\OneDrive`). Muốn dùng tài khoản khác thì thêm `-OneDriveAccount <email>`.
 - Thư mục dữ liệu mặc định là `D:\K\K\physical design`. Nếu không thấy, script tự tìm thư mục tên `physical design` hoặc hỏi bạn. Muốn chỉ định thì thêm `-DataDir "…"`.
 - Ngay sau bước 3, câu hỏi thử `cts skew uncertainty.md` đang chờ sẽ được trả lời. Đó là bài kiểm tra toàn tuyến; nếu không cần, xoá file đó trước khi chạy.
 - Cấu hình và nhật ký nằm ở `%LOCALAPPDATA%\PD_Bridge`, không nằm trong OneDrive. Gỡ watcher: chạy `cai_dat.ps1 -Uninstall`.
@@ -79,7 +93,7 @@ Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết
 
 | # | Quyền | Ở đâu | Bắt buộc? |
 |---|---|---|---|
-| 1 | Đăng nhập tài khoản **OneDrive Alchip** trên máy ngoài, thư mục PD_Bridge ở chế độ "Always keep on this device" (script tự đặt) | Ứng dụng OneDrive trên máy ngoài | Bắt buộc |
+| 1 | Đăng nhập tài khoản **OneDrive khuongmat456@gmail.com** trên máy ngoài, thư mục PD_Bridge ở chế độ "Always keep on this device" (script tự đặt) | Ứng dụng OneDrive trên máy ngoài | Bắt buộc |
 | 2 | Chạy script PowerShell một lần: `-ExecutionPolicy Bypass` (không cần quyền admin) | PowerShell | Bắt buộc |
 | 3 | Đăng nhập **Claude Code** bằng tài khoản Claude (Pro/Max), không dùng API key | Trình duyệt mở ra khi chạy `cai_dat.ps1` | Bắt buộc |
 | 4 | Cho phép tạo **Task Scheduler** cho user hiện tại (nếu công ty chặn, script tự dùng thư mục Startup) | Windows | Bắt buộc (tự động) |
@@ -87,7 +101,6 @@ Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết
 | 6 | Đọc thư mục `D:\K\K\physical design` (Claude chỉ đọc; quyền ghi bị chặn ở cấp permission) | Máy ngoài | Bắt buộc |
 | 7 | Đổi cài đặt nguồn: gập nắp khi cắm sạc thì không ngủ | `powercfg` (script hỏi) | Nên có |
 | 8 | Quyền ghi GitHub cho Claude (đã có) để cập nhật code PD_Bridge | github.com/apps/claude | Để cập nhật tool |
-| 9 | (Tuỳ chọn) IT cấp `Files.ReadWrite.All` cho connector Microsoft 365 của Claude. Có quyền này thì phiên chat trên web cũng ghi được câu trả lời vào OneDrive khi máy ngoài tắt | Microsoft Entra admin | Không bắt buộc |
 
 Trong lúc chạy, Claude Code trên máy ngoài **không hỏi xác nhận gì**: các quyền được cấp sẵn trong lệnh gọi, gồm đọc dữ liệu, web, chạy script tra cứu cục bộ và ghi file trả lời. Mọi thao tác khác đều bị từ chối tự động.
 
@@ -98,7 +111,7 @@ Trong lúc chạy, Claude Code trên máy ngoài **không hỏi xác nhận gì*
     ├── cau_hoi/     câu hỏi và trả lời (giữ 5 lượt mới nhất)
     ├── tong_hop/    nhật ký (nhat_ky.md, nhat_ky.jsonl) và tổng hợp tuần
     ├── kien_thuc/   kinh_nghiem.md (kiến thức ✅ tích luỹ), boi_canh_du_an.md (bối cảnh dự án)
-    ├── du_lieu_gui/ dữ liệu bạn gửi kèm câu hỏi, theo từng Qnnn
+    ├── du_lieu_gui/ dữ liệu bạn gửi kèm câu hỏi, theo từng Qnnn (+ MUC_LUC.md) — bộ nhớ lâu dài
     └── tools/       watcher.ps1, cai_dat.ps1, bridge.py, pd_index.py, pd_summarize.py
 
 Chỉ mục tìm kiếm nằm ở `D:\K\K\physical design\.pd_index\index.db`. Nó chứa toàn văn PDF (theo trang), HTML, docx, script, report và log. Watcher làm mới chỉ mục mỗi ngày, chỉ đọc lại những file đã thay đổi. Xem số file bằng lệnh `status` bên dưới.

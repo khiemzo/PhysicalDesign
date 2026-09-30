@@ -5,13 +5,13 @@ Tài liệu cho Claude (và người bảo trì). Người hỏi chỉ cần đ�
 ## 1. Luồng tự động (watcher, không cần chat)
 
 ```
-cau_hoi/abc.md  --(ổn định 60s)-->  đổi tên Q007_abc.md + Q007_traloi.md "⏳ Đã nhận"
+cau_hoi/[mode] abc.md (hoặc thư mục kèm dữ liệu)  --(ổn định 2s)-->  đổi tên Q007_abc.md + Q007_traloi.md "⏳ Đã nhận"
      --> claude -p (model theo mode, cwd = PD_Bridge, --add-dir <physical design> <runs\Q007..>)
      --> Claude ghi runs\Q007-v1-...\answer.md
      --> bridge thêm tiêu đề + dòng danh_gia + marker -> cau_hoi/Q007_traloi.md
 ```
 
-- Phát hiện file mới / sửa file: script Python quét thư mục mỗi 5 giây (**0 token**).
+- Phát hiện file mới / sửa file: script Python quét thư mục mỗi giây (**0 token**); tên file [nhanh]/[chuan]/[sau](-model) chọn mode/model; thư mục hoặc file cùng tên gốc = dữ liệu đính kèm (chuyển vào du_lieu_gui/Qnnn_*, tóm tắt sẵn trong prompt).
 - File trả lời có marker cuối `<!-- pd_bridge q=Q007 v=1 hash=… status=done … -->`.
   `hash` là hash nội dung câu hỏi lúc trả lời → câu hỏi bị sửa (hash khác) thì trả lời lại (v2),
   bản cũ chuyển thành `Q007_traloi_cu.md`, prompt mới kèm diff câu hỏi + đường dẫn bản cũ + đánh giá.

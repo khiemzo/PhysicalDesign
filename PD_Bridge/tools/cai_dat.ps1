@@ -132,7 +132,7 @@ if ($alchip) {
     Warn 'Chưa thấy OneDrive Alchip (chưa thêm tài khoản: OneDrive > Settings > Account > Add an account).'
     Warn "Tạm dùng: $SrcRoot — chạy lại script này sau khi thêm tài khoản để chuyển sang."
 }
-foreach ($d in @('cau_hoi', 'tong_hop', 'kien_thuc')) { New-Item -ItemType Directory -Force -Path (Join-Path $Bridge $d) | Out-Null }
+foreach ($d in @('cau_hoi', 'tong_hop', 'kien_thuc', 'du_lieu_gui')) { New-Item -ItemType Directory -Force -Path (Join-Path $Bridge $d) | Out-Null }
 try { & attrib +P -U "$Bridge\*" /S /D 2>$null | Out-Null; & attrib +P -U "$Bridge" 2>$null | Out-Null } catch {}   # luôn giữ trên máy
 
 # =============================================================================== 2. PYTHON
@@ -310,14 +310,25 @@ if (-not $NoStart) {
     if ($ok) { Ok 'Watcher đang chạy.' } else { Warn "Chưa thấy watcher khởi động — xem $log và bridge_err.log" }
 }
 
+# =============================================================================== 6b. NGUỒN ĐIỆN
+if (Ask 'Giữ máy chạy khi gập nắp laptop (cắm sạc) để watcher không bị ngắt?') {
+    try {
+        & powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0 | Out-Null
+        & powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 0 | Out-Null
+        & powercfg /setactive SCHEME_CURRENT | Out-Null
+        Ok 'Khi cắm sạc: gập nắp không ngủ, không tự ngủ.'
+    } catch { Warn "Không đổi được cài đặt nguồn ($_) — tự chỉnh trong Control Panel > Power Options." }
+}
+
 # =============================================================================== 7. KIỂM TRA
 Step '7. Kiểm tra (0 token)'
 & $py (Join-Path $Bridge 'tools\bridge.py') doctor
 
 Say ''
 Say 'XONG. Cách dùng:' 'Cyan'
-Say "  - Tạo file .md trong: $(Join-Path $Bridge 'cau_hoi')  (dòng đầu tuỳ chọn: mode: nhanh | chuan | sau)"
-Say '  - Khoảng 1 phút sau khi lưu, Claude bắt đầu; câu trả lời là Qnnn_traloi.md cùng thư mục.'
+Say "  - Tạo file .md trong: $(Join-Path $Bridge 'cau_hoi')  (ví dụ: [sau] hold sau cts.md)"
+Say '  - Vài giây sau khi lưu, Claude bắt đầu; câu trả lời là Qnnn_traloi.md cùng thư mục.'
+Say '  - Tên file: [nhanh] / [chuan] / [sau] (+ -sonnet/-opus) để chọn mode/model; thư mục = câu hỏi kèm dữ liệu.'
 Say "  - Nhật ký: $(Join-Path $HomeDir 'watcher.log')"
 Say '  - Để máy bật + đăng nhập Windows, không gập nắp laptop.'
 $test = Join-Path $Bridge 'cau_hoi\cts skew uncertainty.md'

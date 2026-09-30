@@ -8,21 +8,30 @@ Bạn chỉ cần tạo một file câu hỏi. Mọi việc còn lại tự đ�
 
 ## Cách hỏi
 
-1. Trong `cau_hoi/`, tạo một file `.md` (hoặc `.txt`), đặt tên tuỳ ý, ví dụ `hold sau cts.md`.
-2. Viết câu hỏi và yêu cầu. Muốn chọn mode thì thêm một dòng ở đầu file:
+1. Trong `cau_hoi/`, tạo một file `.md` (hoặc `.txt`). **Tên file quyết định mode và model**:
 
-       mode: sau
-       Vì sao hold âm nhiều sau CTS ở block median_filter? So sánh với flow trong one.tcl.
+   | Tên file | Mode | Model |
+   |---|---|---|
+   | `[nhanh] cu phap set_clock_uncertainty.md` | nhanh | Sonnet |
+   | `hold sau cts.md` (không có tiền tố) | chuan | Opus |
+   | `[sau] vi sao hold am sau cts.md` | sau | Opus |
+   | `[sau-sonnet] ….md`, `[nhanh-opus] ….md`, `[haiku] ….md` | theo tiền tố | model ghi sau dấu `-` |
 
-3. Lưu file là xong. Khoảng 1 phút sau khi file dừng thay đổi, Claude bắt đầu làm.
-   - File câu hỏi được đổi tên thành `Qnnn_<tên của bạn>.md`.
-   - `Qnnn_traloi.md` xuất hiện ngay với trạng thái ⏳, xong thì được thay bằng câu trả lời.
+   Không cần mẫu. Chỉ cần viết câu hỏi và yêu cầu vào file. Dòng `mode: …` ở đầu nội dung vẫn được nhận, và ưu tiên hơn tiền tố trong tên file.
+2. **Gửi kèm dữ liệu** (report, log, script, ảnh, PDF). Có 2 cách:
+   - **Thư mục**: tạo thư mục `cau_hoi/[sau] hold median/`, bỏ vào đó 1 file câu hỏi `.md` cùng các file dữ liệu.
+   - **Cùng tên gốc**: `hold.md` kèm `hold_timing.rpt`, `hold_innovus.log`.
 
-Không cần mẫu và không cần chỉ đường dẫn dữ liệu. Claude tự tìm report, log, script và tài liệu (kể cả Innovus Text Command Reference) trong thư mục physical design, rồi kiểm chứng và bổ sung bằng web.
+   Script tự tóm tắt report/log (WNS/TNS, top path, ERROR/WARN…) và đưa vào đề bài, nên Claude không tốn token mở file lớn. Dữ liệu được lưu lâu dài ở `du_lieu_gui/Qnnn_<tên>/`.
+3. Lưu file là xong. **Khoảng 2–3 giây** sau khi file có trên máy ngoài, `Qnnn_traloi.md` xuất hiện với trạng thái "⏳ Đã nhận" và Claude bắt đầu làm. Tên câu hỏi được đổi thành `Qnnn_<tên của bạn>.md`.
+   - Đo thực tế: phát hiện file và xác nhận "Đã nhận" sau 2–3 giây. Mode nhanh cho câu trả lời đầy đủ sau khoảng 20–40 giây; mode chuan sau khoảng 2–5 phút.
+   - Còn thêm thời gian OneDrive đồng bộ giữa hai máy (thường 5–30 giây). Phần này do OneDrive quyết định, script không điều khiển được.
 
-| mode | Dùng khi | Cách làm | Model |
+Claude tự tìm report, log, script và tài liệu (kể cả Innovus Text Command Reference) trong thư mục physical design, rồi kiểm chứng và bổ sung bằng web.
+
+| mode | Dùng khi | Cách làm | Model mặc định |
 |---|---|---|---|
-| `nhanh` | Câu hỏi lệnh/cú pháp, cần kết quả sớm (vài phút) | Kho kinh nghiệm và tài liệu trên máy, web để kiểm chứng | Sonnet |
+| `nhanh` | Câu hỏi lệnh/cú pháp, cần kết quả sớm | Kho kinh nghiệm và tài liệu trên máy, web để kiểm chứng | Sonnet |
 | `chuan` (mặc định) | Phần lớn câu hỏi | Tìm kỹ trên máy, đọc dữ liệu liên quan, research web 2–4 nguồn | Opus |
 | `sau` | Debug khó, so sánh phương án, cần lý thuyết (có thể 20–40 phút) | Nhiều vòng trên máy và web (paper, app note), so sánh phương án | Opus |
 
@@ -39,13 +48,14 @@ Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết
 
 ## Tốn token thế nào
 
-- **Khi không có câu hỏi: 0 token.** Việc phát hiện file mới (quét mỗi 5 giây), làm mới chỉ mục tài liệu, dọn file cũ và kiểm tra đăng nhập đều do script trên máy làm.
+- **Khi không có câu hỏi: 0 token.** Việc phát hiện file mới (quét mỗi giây), làm mới chỉ mục tài liệu, dọn file cũ và kiểm tra đăng nhập đều do script trên máy làm.
 - **Mỗi câu hỏi:** một lần chạy Claude Code, tính vào hạn mức gói Claude của bạn. **Không dùng API và không phát sinh chi phí ngoài:** watcher gỡ `ANTHROPIC_API_KEY` khỏi môi trường, và từ chối chạy nếu Claude Code đang đăng nhập bằng API key.
 - **Tiết kiệm phần đọc:**
   - Script trên máy tìm sẵn tài liệu liên quan và đưa vào đề bài.
   - Report 150KB được tóm tắt còn vài chục dòng.
   - PDF lớn được đọc đúng trang cần.
-  - Claude Code không nạp MCP server, và câu trả lời không bị in lặp ra màn hình.
+  - Claude Code chỉ nạp các công cụ cần dùng và không nạp MCP server. Nhờ vậy phần token cố định mỗi bước giảm từ khoảng 29.000 xuống 11.000 (đo thực tế).
+  - Câu trả lời ghi thẳng vào file, không in lặp ra màn hình.
   - Câu trả lời thì không bao giờ bị cắt ngắn.
 - **Khi hết hạn mức:** nếu Opus hết thì watcher chuyển sang Sonnet ngay. Nếu cả gói hết thì watcher đọc giờ reset, tạm dừng, rồi tự làm tiếp. Trong lúc đó câu hỏi mới vẫn được nhận và xếp hàng.
 - **Đổi model:** sửa mục `models` trong `%LOCALAPPDATA%\PD_Bridge\config.json`. Ví dụ đặt `"chuan": "sonnet"` để được nhiều câu hỏi hơn mỗi ngày. Mục `effort` chỉnh độ suy nghĩ (`low` / `medium` / `high`).
@@ -58,12 +68,28 @@ Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết
 | 1 | Thêm tài khoản OneDrive **Alchip**: bấm biểu tượng OneDrive → Settings → Account → Add an account, rồi chờ đồng bộ xong |
 | 2 | Mở PowerShell và chạy: `powershell -ExecutionPolicy Bypass -File "C:\Users\khiem\OneDrive\PD_Bridge\tools\cai_dat.ps1"` |
 | 3 | Trả lời **Y** các câu script hỏi: chuyển PD_Bridge sang OneDrive Alchip, cài Python / Git / Claude Code nếu thiếu. Trình duyệt sẽ mở để bạn đăng nhập Claude (tài khoản Pro của bạn) |
-| 4 | Để máy bật và đăng nhập Windows, đừng gập nắp laptop. Khi đang chạy, watcher tự chặn máy ngủ |
+| 4 | Để máy bật và đăng nhập Windows. Script hỏi có đặt "gập nắp khi cắm sạc thì không ngủ" hay không; watcher cũng tự chặn máy ngủ |
 
 - Script tự tìm thư mục `OneDrive - Alchip…`. Nếu chưa thấy (chưa làm bước 1), PD_Bridge tạm ở OneDrive cá nhân; chạy lại script sau khi thêm tài khoản.
 - Thư mục dữ liệu mặc định là `D:\K\K\physical design`. Nếu không thấy, script tự tìm thư mục tên `physical design` hoặc hỏi bạn. Muốn chỉ định thì thêm `-DataDir "…"`.
 - Ngay sau bước 3, câu hỏi thử `cts skew uncertainty.md` đang chờ sẽ được trả lời. Đó là bài kiểm tra toàn tuyến; nếu không cần, xoá file đó trước khi chạy.
 - Cấu hình và nhật ký nằm ở `%LOCALAPPDATA%\PD_Bridge`, không nằm trong OneDrive. Gỡ watcher: chạy `cai_dat.ps1 -Uninstall`.
+
+## Quyền cần cấp để hệ thống tự chạy
+
+| # | Quyền | Ở đâu | Bắt buộc? |
+|---|---|---|---|
+| 1 | Đăng nhập tài khoản **OneDrive Alchip** trên máy ngoài, thư mục PD_Bridge ở chế độ "Always keep on this device" (script tự đặt) | Ứng dụng OneDrive trên máy ngoài | Bắt buộc |
+| 2 | Chạy script PowerShell một lần: `-ExecutionPolicy Bypass` (không cần quyền admin) | PowerShell | Bắt buộc |
+| 3 | Đăng nhập **Claude Code** bằng tài khoản Claude (Pro/Max), không dùng API key | Trình duyệt mở ra khi chạy `cai_dat.ps1` | Bắt buộc |
+| 4 | Cho phép tạo **Task Scheduler** cho user hiện tại (nếu công ty chặn, script tự dùng thư mục Startup) | Windows | Bắt buộc (tự động) |
+| 5 | Cài Python, Git for Windows, Claude Code qua winget hoặc trình cài chính thức | Windows | Chỉ khi máy chưa có |
+| 6 | Đọc thư mục `D:\K\K\physical design` (Claude chỉ đọc; quyền ghi bị chặn ở cấp permission) | Máy ngoài | Bắt buộc |
+| 7 | Đổi cài đặt nguồn: gập nắp khi cắm sạc thì không ngủ | `powercfg` (script hỏi) | Nên có |
+| 8 | Quyền ghi GitHub cho Claude (đã có) để cập nhật code PD_Bridge | github.com/apps/claude | Để cập nhật tool |
+| 9 | (Tuỳ chọn) IT cấp `Files.ReadWrite.All` cho connector Microsoft 365 của Claude. Có quyền này thì phiên chat trên web cũng ghi được câu trả lời vào OneDrive khi máy ngoài tắt | Microsoft Entra admin | Không bắt buộc |
+
+Trong lúc chạy, Claude Code trên máy ngoài **không hỏi xác nhận gì**: các quyền được cấp sẵn trong lệnh gọi, gồm đọc dữ liệu, web, chạy script tra cứu cục bộ và ghi file trả lời. Mọi thao tác khác đều bị từ chối tự động.
 
 ## Cấu trúc
 
@@ -72,6 +98,7 @@ Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết
     ├── cau_hoi/     câu hỏi và trả lời (giữ 5 lượt mới nhất)
     ├── tong_hop/    nhật ký (nhat_ky.md, nhat_ky.jsonl) và tổng hợp tuần
     ├── kien_thuc/   kinh_nghiem.md (kiến thức ✅ tích luỹ), boi_canh_du_an.md (bối cảnh dự án)
+    ├── du_lieu_gui/ dữ liệu bạn gửi kèm câu hỏi, theo từng Qnnn
     └── tools/       watcher.ps1, cai_dat.ps1, bridge.py, pd_index.py, pd_summarize.py
 
 Chỉ mục tìm kiếm nằm ở `D:\K\K\physical design\.pd_index\index.db`. Nó chứa toàn văn PDF (theo trang), HTML, docx, script, report và log. Watcher làm mới chỉ mục mỗi ngày, chỉ đọc lại những file đã thay đổi. Xem số file bằng lệnh `status` bên dưới.

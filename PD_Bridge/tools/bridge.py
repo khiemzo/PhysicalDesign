@@ -45,6 +45,7 @@ except Exception:
 TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS_DIR))
 import pd_index  # noqa: E402
+import pd_summarize  # noqa: E402
 
 IS_WIN = os.name == "nt"
 CREATE_NO_WINDOW = 0x08000000 if IS_WIN else 0
@@ -69,8 +70,8 @@ DEFAULTS = {
     "max_turns": {"nhanh": 30, "chuan": 80, "sau": 200, "tong_hop": 40},
     "timeout_min": {"nhanh": 20, "chuan": 45, "sau": 100, "tong_hop": 30},
     "default_mode": "chuan",
-    "debounce_seconds": 60,
-    "poll_seconds": 5,
+    "debounce_seconds": 2,       # file ngừng thay đổi 2 giây là nhận
+    "poll_seconds": 1,           # quét thư mục câu hỏi mỗi giây (0 token)
     "keep_rounds": 5,
     "trash_after_minutes": 60,
     "index_refresh_hours": 24,
@@ -80,7 +81,9 @@ DEFAULTS = {
     "chat_lock_hours": 3,
     "prevent_sleep": True,
     "pre_search_hits": 12,
+    "attach_inline_chars": 14000,    # tổng ký tự file đính kèm đưa thẳng vào đề bài
 }
+MODEL_NAMES = {"opus", "sonnet", "haiku", "fable"}
 
 Q_RX = re.compile(r"^(Q\d{3,})_(.+)\.md$", re.I)
 ANS_RX = re.compile(r"^(Q\d{3,})_traloi\.md$", re.I)
@@ -112,8 +115,21 @@ def strip_accents(s: str) -> str:
     return pd_index.strip_accents(s)
 
 
+_READ_CACHE: dict[str, tuple] = {}
+
+
 def read_text(p: Path) -> str:
-    return pd_index.decode_bytes(p.read_bytes())
+    """Đọc file (có cache theo size/mtime để quét mỗi giây không tốn I/O)."""
+    st = p.stat()
+    key = str(p)
+    c = _READ_CACHE.get(key)
+    if c and c[0] == st.st_size and c[1] == st.st_mtime_ns:
+        return c[2]
+    t = pd_index.decode_bytes(p.read_bytes())
+    if len(_READ_CACHE) > 400:
+        _READ_CACHE.clear()
+    _READ_CACHE[key] = (st.st_size, st.st_mtime_ns, t)
+    return t
 
 
 def norm_text(t: str) -> str:
@@ -159,6 +175,27 @@ def parse_mode(text: str, default: str) -> tuple[str, str, str | None]:
             body = "\n".join(lines[:i] + lines[i + 1:]).strip()
             return (mode or default), body, (None if mode else m.group(1))
     return default, "\n".join(lines).strip(), None
+
+
+PREFIX_RX = re.compile(r"^\s*[\[(]\s*([^\])]+?)\s*[\])]\s*(.*)$")
+
+
+def parse_prefix(stem: str) -> tuple[str | None, str | None, str]:
+    """'[sau-sonnet] hold sau cts' -> ('sau', 'sonnet', 'hold sau cts'). Không có tiền tố -> (None, None, stem)."""
+    m = PREFIX_RX.match(stem)
+    if not m:
+        return None, None, stem
+    mode = model = None
+    for tok in re.split(r"[\s,;/+_\-]+", strip_accents(m.group(1)).lower()):
+        if not tok:
+            continue
+        if tok in MODE_ALIASES and mode is None:
+            mode = MODE_ALIASES[tok]
+        elif tok in MODEL_NAMES and model is None:
+            model = tok
+        else:
+            return None, None, stem          # không phải tiền tố quy tắc -> giữ nguyên tên
+    return mode, model, (m.group(2).strip() or stem)
 
 
 def parse_rating(text: str) -> tuple[str, str]:
@@ -528,6 +565,13 @@ class ClaudeRunner:
         fb = (self.cfg.get("models") or {}).get("fallback")
         if fb and "--fallback-model" in f and model_short(fb) != model_short(model):
             cmd += ["--fallback-model", fb]
+        if "--tools" in f:                     # chỉ nạp mô tả các tool cần dùng -> bớt token cố định
+            names = sorted({re.sub(r"\(.*", "", t) for t in allowed if t != "TodoWrite"})
+            if not IS_WIN:
+                names = [n for n in names if n != "PowerShell"]
+            cmd += ["--tools", ",".join(dict.fromkeys(names))]
+        if "--exclude-dynamic-system-prompt-sections" in f:
+            cmd += ["--exclude-dynamic-system-prompt-sections"]   # tăng cache hit giữa các lượt
         if "--strict-mcp-config" in f:
             cmd += ["--strict-mcp-config"]      # không nạp MCP server -> bớt token mô tả tool
         mt = max_turns or (self.cfg.get("max_turns") or {}).get(job)
@@ -629,6 +673,7 @@ class Bridge:
         self.tong_hop = self.root / "tong_hop"
         self.kien_thuc = self.root / "kien_thuc"
         self.tools = self.root / "tools"
+        self.gui = self.root / "du_lieu_gui"          # file đính kèm người hỏi gửi, lưu lâu dài
         if not (self.tools / "pd_index.py").exists():
             self.tools = TOOLS_DIR
         self.runs = self.home / "runs"
@@ -670,6 +715,11 @@ class Bridge:
         debounce = self.cfg["debounce_seconds"] if debounce is None else debounce
         try:
             st = p.stat()
+            if p.is_dir():
+                files = [f for f in p.rglob("*") if f.is_file()]
+                size = sum(f.stat().st_size for f in files)
+                mt = max([f.stat().st_mtime for f in files] + [st.st_mtime])
+                st = os.stat_result((0, 0, 0, 0, 0, 0, size, 0, mt, 0))
         except OSError:
             return False
         key = p.name
@@ -693,7 +743,13 @@ class Bridge:
         except OSError:
             return new, rounds
         for p in entries:
-            if not p.is_file() or self.is_ignored(p.name):
+            if self.is_ignored(p.name):
+                continue
+            if p.is_dir():
+                if not re.match(r"^Q\d{3,}_", p.name):
+                    new.append(p)                  # thư mục = câu hỏi kèm file dữ liệu
+                continue
+            if not p.is_file():
                 continue
             n = p.name
             m = ANS_RX.match(n)
@@ -731,6 +787,8 @@ class Bridge:
     # ------------------------------------------------------------------ claim
     def claim_new(self, p: Path, status_msg: str = "⏳ Đã nhận — đang chờ xử lý.") -> str | None:
         """Đổi tên câu hỏi mới -> Qnnn_<tên>.md và tạo file trả lời tạm. 0 token."""
+        if p.is_dir():
+            return self.claim_dir(p, status_msg)
         try:
             text = read_text(p)
         except OSError:
@@ -763,10 +821,131 @@ class Bridge:
             self.state.d["last_id"] = qnum(qid)
             self.state.sub("aliases")[p.name] = {"q": qid, "ts": now()}
             self.state.save()
-        mode, _, _ = parse_mode(text, self.cfg["default_mode"])
+        self.state.sub("att")[qid] = {"orig": display_stem(p.name)}
+        self.state.save()
+        n_att = self.sweep_attachments(qid)
+        mode, model = self.resolve_mode(stem, text)
         self.write_placeholder(qid, stem, mode, 1, "queued", status_msg)
-        log.info("Câu hỏi mới: '%s' -> %s (mode %s)", p.name, target.name, mode)
+        log.info("Câu hỏi mới: '%s' -> %s (mode %s, model %s%s)", p.name, target.name, mode, model,
+                 f", {n_att} file đính kèm" if n_att else "")
         return qid
+
+    def claim_dir(self, d: Path, status_msg: str) -> str | None:
+        """Thư mục câu hỏi: 1 file .md/.txt là câu hỏi, các file còn lại là dữ liệu đính kèm."""
+        files = [f for f in d.iterdir() if f.is_file() and not self.is_ignored(f.name)]
+        qs = [f for f in files if f.suffix.lower() in (".md", ".txt", ".markdown")]
+        qs.sort(key=lambda f: (not re.search(r"cau.?hoi|question|hoi", strip_accents(f.name).lower()),
+                               f.stat().st_size))
+        text = ""
+        if qs:
+            text = read_text(qs[0])
+        if not norm_text(text):
+            if not files:
+                return None
+            text = f"{display_stem(d.name)}\n\n(Phân tích các file dữ liệu đính kèm.)"
+        with self.state.lock:
+            qid = self.next_id()
+            stem = display_stem(d.name)
+            dest = self.gui / f"{qid}_{stem}"
+            self.gui.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.move(str(d), str(dest))
+            except OSError as e:
+                log.warning("Chưa chuyển được thư mục %s (%s) — thử lại sau", d.name, e)
+                return None
+            if qs:
+                try:
+                    (dest / qs[0].name).unlink()
+                except OSError:
+                    pass
+            atomic_write(self.qdir / f"{qid}_{stem}.md", text)
+            self.state.d["last_id"] = qnum(qid)
+            self.state.sub("att")[qid] = {"orig": stem, "dir": str(dest)}
+            self.state.save()
+        mode, model = self.resolve_mode(stem, text)
+        self.write_placeholder(qid, stem, mode, 1, "queued", status_msg)
+        log.info("Câu hỏi mới (thư mục): '%s' -> %s_%s.md (mode %s, %d file đính kèm)", d.name, qid, stem,
+                 mode, len(files) - (1 if qs else 0))
+        return qid
+
+    def resolve_mode(self, stem: str, text: str) -> tuple[str, str]:
+        """mode: dòng 'mode:' trong nội dung > tiền tố tên file > mặc định. model: tiền tố > config."""
+        pmode, pmodel, _ = parse_prefix(stem)
+        cmode, _, _ = parse_mode(text, "")
+        mode = cmode or pmode or self.cfg["default_mode"]
+        model = pmodel or self.cfg["models"].get(mode, "opus")
+        return mode, model
+
+    def sweep_attachments(self, qid: str) -> int:
+        """Chuyển file dữ liệu cùng tên gốc (vd. hold.md + hold_timing.rpt) vào du_lieu_gui/Qnnn_*/."""
+        meta = self.state.sub("att").get(qid) or {}
+        orig = (meta.get("orig") or "").lower()
+        if not orig:
+            return 0
+        moved = 0
+        try:
+            entries = list(self.qdir.iterdir())
+        except OSError:
+            return 0
+        for f in entries:
+            if not f.is_file() or self.is_ignored(f.name) or f.suffix.lower() in (".md", ".txt", ".markdown"):
+                continue
+            if re.match(r"^Q\d{3,}_", f.name) or not f.name.lower().startswith(orig):
+                continue
+            dest = Path(meta.get("dir") or (self.gui / f"{qid}_{orig}"))
+            dest.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.move(str(f), str(dest / f.name))
+                moved += 1
+            except OSError:
+                continue
+            meta["dir"] = str(dest)
+        if moved:
+            self.state.sub("att")[qid] = meta
+            self.state.save()
+        return moved
+
+    def attachments_dir(self, qid: str) -> Path | None:
+        d = (self.state.sub("att").get(qid) or {}).get("dir")
+        if d and Path(d).is_dir():
+            return Path(d)
+        return None
+
+    def attachment_context(self, qid: str) -> str:
+        """Tóm tắt file đính kèm bằng script (0 token) để Claude không phải tự mở từng file."""
+        d = self.attachments_dir(qid)
+        if not d:
+            return ""
+        budget = int(self.cfg.get("attach_inline_chars", 14000))
+        out = [f"Thư mục: {d}"]
+        files = sorted((f for f in d.rglob("*") if f.is_file()), key=lambda f: f.name.lower())[:40]
+        for f in files:
+            rel = f.relative_to(d).as_posix()
+            size = f.stat().st_size
+            ext = f.suffix.lower()
+            head = f"- {rel} ({pd_summarize.human(size)})"
+            try:
+                if ext in (".pdf", ".docx", ".pptx", ".xlsx", ".png", ".jpg", ".jpeg", ".gif", ".bmp"):
+                    out.append(head + " — mở bằng Read nếu cần (PDF/ảnh đọc trực tiếp được)")
+                    continue
+                raw = f.read_bytes()[:200000]
+                if pd_index.looks_binary(raw):
+                    out.append(head + " — file nhị phân")
+                    continue
+                if size <= 6000 and budget > size:
+                    txt = pd_index.decode_bytes(raw).strip()
+                    out.append(head + ":\n```\n" + txt + "\n```")
+                    budget -= len(txt)
+                elif budget > 500:
+                    sm = pd_summarize.summarize_file(f, max_lines=35, top=8)
+                    sm = sm[: min(len(sm), budget)]
+                    out.append(head + " — tóm tắt tự động:\n```\n" + sm + "\n```")
+                    budget -= len(sm)
+                else:
+                    out.append(head)
+            except Exception as e:  # noqa: BLE001
+                out.append(head + f" — không đọc được ({e})")
+        return "\n".join(out)
 
     def write_placeholder(self, qid: str, stem: str, mode: str, v: int, status: str, msg: str,
                           extra: str = "") -> None:
@@ -891,6 +1070,8 @@ class Bridge:
 
     def build_prompt(self, qid: str, stem: str, mode: str, question: str, answer_tmp: Path,
                      edit: dict | None, raw_mode: str | None) -> str:
+        att = self.attachment_context(qid)
+        search_text = question + " " + parse_prefix(stem)[2]
         tools = self.tools
         py = Path(self.cfg.get("python") or sys.executable).stem.lower()   # python (Windows) / python3
         if py not in ("python", "python3", "py"):
@@ -913,8 +1094,10 @@ class Bridge:
             f'  {py} "{tools / "pd_summarize.py"}" "<report/log hoặc thư mục run>"',
             "",
             "GỢI Ý TỪ CHỈ MỤC (tự động theo từ khoá câu hỏi, có thể chưa đủ):",
-            self.pre_search(question),
+            self.pre_search(search_text),
         ]
+        if att:
+            parts += ["", "DỮ LIỆU NGƯỜI HỎI GỬI KÈM (ưu tiên phân tích; đã tóm tắt sẵn, mở file gốc khi cần chi tiết):", att]
         if bc:
             parts += ["", "BỐI CẢNH DỰ ÁN (kien_thuc/boi_canh_du_an.md):", bc]
         if kt:
@@ -940,7 +1123,7 @@ class Bridge:
         return "\n".join(parts)
 
     def allowed_tools(self, web: bool = True) -> list[str]:
-        base = ["Read", "Grep", "Glob", "Write", "Edit", "TodoWrite",
+        base = ["Read", "Grep", "Glob", "Write", "Edit",
                 "Bash(python *)", "Bash(python3 *)", "Bash(py *)",
                 "PowerShell(python *)", "PowerShell(py *)"]
         # lệnh chỉ-đọc (Git Bash / PowerShell) để xem nhanh file lớn
@@ -963,7 +1146,10 @@ class Bridge:
         stem = Q_RX.match(qf.name).group(2)
         qtext_raw = read_text(qf)
         qhash = text_hash(qtext_raw)
-        mode, question, raw_mode = parse_mode(qtext_raw, self.cfg["default_mode"])
+        _, question, raw_mode = parse_mode(qtext_raw, self.cfg["default_mode"])
+        mode, model = self.resolve_mode(stem, qtext_raw)
+        if not chat:
+            self.sweep_attachments(qid)
         if not question.strip():
             log.info("%s: câu hỏi rỗng — bỏ qua", qid)
             return None
@@ -999,14 +1185,14 @@ class Bridge:
             self.write_placeholder(qid, stem, mode, v, "running", "⏳ Đang được trả lời trong chat…")
             info["prompt"] = prompt
             return info
-        model = self.cfg["models"].get(mode, "opus")
         self.write_placeholder(qid, stem, mode, v, "running",
                                f"⏳ Đang xử lý (mode {mode}, model {model_short(model)}) — bắt đầu {ts_str(fmt='%H:%M')}.")
         log.info("%s: bắt đầu (mode %s, model %s, v%d)", qid, mode, model, v)
         if self.cfg.get("runner") == "routine":
             res = self.run_routine(prompt, answer_tmp, mode)
         else:
-            res = self.run_with_fallback(prompt, mode, model, run_dir, answer_tmp, job=mode)
+            res = self.run_with_fallback(prompt, mode, model, run_dir, answer_tmp, job=mode,
+                                         extra_dirs=[self.attachments_dir(qid)])
         return self.handle_result(info, res, model)
 
     def preflight(self) -> str | None:
@@ -1026,9 +1212,9 @@ class Bridge:
         return None
 
     def run_with_fallback(self, prompt: str, mode: str, model: str, run_dir: Path, answer_tmp: Path,
-                          job: str) -> RunResult:
+                          job: str, extra_dirs: list | None = None) -> RunResult:
         cwd = self.root
-        add_dirs = [d for d in (self.data_dir, run_dir, self.tools) if d and Path(d).exists()]
+        add_dirs = [d for d in (self.data_dir, run_dir, self.tools, *(extra_dirs or [])) if d and Path(d).exists()]
         deny = [self.data_dir] if self.data_dir else []
         allowed = self.allowed_tools(web=True)
         res = self.runner.run(prompt, model, job, cwd, add_dirs, deny, allowed, run_dir)
@@ -1539,7 +1725,9 @@ class Bridge:
             if self.paused():
                 break
             new, rounds = self.scan()
-            if new and now_flag:
+            if new:
+                if not now_flag:
+                    time.sleep(float(self.cfg.get("poll_seconds", 1)))   # chờ file ổn định
                 continue
             if not self.pending_jobs(rounds, now_flag) and \
                     (not self.weekly_due() or getattr(self, "_weekly_tried", False)):

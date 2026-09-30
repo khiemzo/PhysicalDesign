@@ -28,7 +28,8 @@ if args[:1] == ["--version"]:
 if args[:1] == ["--help"]:
     print("  -p, --print  --output-format <format>  --model <model>  --permission-mode <mode>\n"
           "  --allowedTools <tools...>  --disallowedTools <tools...>  --add-dir <directories...>\n"
-          "  --effort <level>  --fallback-model <model>  --strict-mcp-config  --resume")
+          "  --effort <level>  --fallback-model <model>  --strict-mcp-config  --resume\n"
+          "  --tools <tools...>  --exclude-dynamic-system-prompt-sections")
     sys.exit(0)
 if args[:2] == ["auth", "status"]:
     st = (HOME / "fake_auth.json")

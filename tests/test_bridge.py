@@ -366,6 +366,52 @@ class T(unittest.TestCase):
                            text=True, env=os.environ)
         self.assertIn("KẾT QUẢ: OK", r.stdout, r.stdout)
 
+    def test_20_filename_prefix_mode_model(self):
+        self.e.ask("[sau-sonnet] hold sau cts.md", "Hold sau CTS?")
+        self.e.ask("[nhanh] cu phap.md", "cú pháp set_clock_uncertainty?", age=9)
+        self.e.ask("[abc] khong phai tien to.md", "câu hỏi thường", age=8)
+        self.e.run(self.b, 6)
+        models = [c["model"] for c in self.e.calls()]
+        self.assertEqual(models, ["sonnet", "sonnet", "opus"])
+        self.assertIn("mode: **sau**", self.ans("Q001"))
+        self.assertIn("mode: **nhanh**", self.ans("Q002"))
+        self.assertIn("mode: **chuan**", self.ans("Q003"))
+        self.assertIn("SÂU", self.e.calls()[0]["prompt"])
+        args = self.e.calls()[0]["args"]
+        tools = args[args.index("--tools") + 1]
+        self.assertIn("WebSearch", tools)
+        self.assertNotIn("Agent", tools)
+        self.assertIn("--exclude-dynamic-system-prompt-sections", args)
+
+    def test_21_folder_with_attachments(self):
+        d = self.e.q / "[nhanh] hold median"
+        d.mkdir()
+        (d / "cau hoi.md").write_text("Phân tích report hold đính kèm, vì sao âm?", encoding="utf-8")
+        src = self.e.data / "median_filter" / "rpt" / "postcts_hold" / "median_filter_postCTS_hold.tarpt"
+        shutil.copy(src, d / "hold.tarpt")
+        (d / "ghi_chu.txt").write_text("block median_filter, run 0930", encoding="utf-8")
+        t = time.time() - 10
+        for f in [d, *d.iterdir()]:
+            os.utime(f, (t, t))
+        self.e.run(self.b)
+        self.assertTrue((self.e.q / "Q001_[nhanh] hold median.md").exists())
+        gui = self.e.root / "du_lieu_gui" / "Q001_[nhanh] hold median"
+        self.assertTrue((gui / "hold.tarpt").exists())
+        self.assertFalse(d.exists())
+        p = self.e.calls()[0]["prompt"]
+        self.assertIn("DỮ LIỆU NGƯỜI HỎI GỬI KÈM", p)
+        self.assertIn("WNS=-0.0870", p)                         # tóm tắt tự động report
+        self.assertIn("run 0930", p)                            # file nhỏ đưa thẳng vào
+        self.assertIn(str(gui), self.e.calls()[0]["args"])       # --add-dir
+        self.assertEqual(self.e.calls()[0]["model"], "sonnet")
+
+    def test_22_same_stem_attachment(self):
+        self.e.ask("hold.md", "Xem log đính kèm")
+        (self.e.q / "hold_innovus.log").write_text("**ERROR: (IMPCCOPT-1209): skew\n" * 3)
+        self.e.run(self.b)
+        self.assertTrue((self.e.root / "du_lieu_gui" / "Q001_hold" / "hold_innovus.log").exists())
+        self.assertIn("IMPCCOPT-1209", self.e.calls()[0]["prompt"])
+
 
 class TWatch(unittest.TestCase):
     """Chạy watcher thật (process riêng) — kiểm tra phát hiện file mới + dừng."""
@@ -385,6 +431,7 @@ class TWatch(unittest.TestCase):
             dt_ = time.time() - t0
             self.assertIn("status=done", (e.q / "Q001_traloi.md").read_text())
             self.assertGreaterEqual(dt_, 0.9, "phải chờ file ổn định")
+            print(f"\n  [đo] thả file -> câu trả lời (claude giả): {dt_:.1f}s")
             p2 = subprocess.run([sys.executable, str(TOOLS / "bridge.py"), "watch"], env=os.environ,
                                 capture_output=True, text=True, timeout=20)
             self.assertEqual(p2.returncode, 0)                           # instance thứ 2 thoát ngay
@@ -400,3 +447,38 @@ class TWatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TLatency(unittest.TestCase):
+    """Đo độ trễ thật với cấu hình mặc định (quét 1s, ổn định 2s)."""
+
+    def test_latency_under_10s(self):
+        e = Env(debounce_seconds=2, poll_seconds=1)
+        try:
+            p = subprocess.Popen([sys.executable, str(TOOLS / "bridge.py"), "watch"], env=os.environ,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(2)
+            res = []
+            for i in range(3):
+                t0 = time.time()
+                (e.q / f"cau {i}.md").write_text(f"câu hỏi số {i}", encoding="utf-8")
+                qid = f"Q{i + 1:03d}"
+                t_ack = t_start = None
+                while time.time() - t0 < 20:
+                    a = e.q / f"{qid}_traloi.md"
+                    if t_ack is None and a.exists():
+                        t_ack = time.time() - t0
+                    if t_start is None and len(e.calls()) > i:
+                        t_start = time.time() - t0
+                    if a.exists() and "status=done" in a.read_text():
+                        break
+                    time.sleep(0.1)
+                res.append((t_ack, t_start))
+            subprocess.run([sys.executable, str(TOOLS / "bridge.py"), "stop"], env=os.environ)
+            p.wait(timeout=20)
+            for i, (a, s) in enumerate(res):
+                print(f"\n  [đo] câu {i}: xác nhận 'Đã nhận' sau {a:.1f}s, Claude bắt đầu sau {s:.1f}s")
+                self.assertLess(a, 5)
+                self.assertLess(s, 10)
+        finally:
+            e.cleanup()

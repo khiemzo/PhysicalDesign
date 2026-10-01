@@ -42,6 +42,12 @@ Trả lời ngay trong phiên chat (không chờ watcher, không tốn thêm m�
 Lệnh hữu ích khác: `bridge.py status` (hàng đợi, hạn mức, chỉ mục), `bridge.py doctor` (kiểm tra cài đặt),
 `bridge.py weekly --force` (tổng hợp tuần ngay), `bridge.py stop` (dừng watcher).
 
+## 2b. Hỏi tiếp
+
+Người hỏi viết dòng `>> …` trong `Qnnn_traloi.md` → watcher (khi file ổn định) chạy `claude -p --resume <phiên cũ>`
+với prompt "HỎI TIẾP"; kết quả chèn thành mục `## 🔁 Hỏi tiếp` trước phần đánh giá, dòng `>>` bị gỡ. Không tiếp tục được phiên cũ
+thì chạy phiên mới (prompt có đường dẫn câu trả lời trước trong kho).
+
 ## 3. Công cụ cục bộ cho việc research (rẻ token)
 
 | Lệnh | Tác dụng |
@@ -58,4 +64,6 @@ Lệnh hữu ích khác: `bridge.py status` (hàng đợi, hạn mức, chỉ m�
 | `<OneDrive khuongmat456@gmail.com>\PD_Bridge\` | câu hỏi/trả lời, tổng hợp, kiến thức, tools (đồng bộ về máy người hỏi) |
 | `%LOCALAPPDATA%\PD_Bridge\config.json` | cấu hình (models, data_dir, runner…) |
 | `%LOCALAPPDATA%\PD_Bridge\watcher.log`, `runs\` | nhật ký, prompt/kết quả từng lượt |
+| `%USERPROFILE%\PD_Bridge_Kho\du_an\<project>\` | kho project trên máy ngoài: hoi_dap (vĩnh viễn), du_lieu, BOI_CANH, KIEN_THUC (◻️ tự học 14 ngày), MUC_LUC, DONG_THOI_GIAN |
+| `<PD_Bridge>\so_tay\` | sổ lệnh + thuật ngữ tự gom từ mục Bài học (0 token) |
 | `<physical design>\.pd_index\index.db` | chỉ mục SQLite FTS5 |

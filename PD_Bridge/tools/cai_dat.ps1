@@ -5,6 +5,7 @@
 
   Tuỳ chọn:
     -OneDriveAccount <email>            tài khoản OneDrive chứa PD_Bridge (mặc định khuongmat456@gmail.com)
+    -StoreDir "D:\PD_Bridge_Kho"         kho project trên máy ngoài, KHÔNG đồng bộ OneDrive (mặc định %USERPROFILE%\PD_Bridge_Kho)
     -DataDir "D:\K\K\physical design"   thư mục dữ liệu (mặc định: giữ cấu hình cũ hoặc D:\K\K\physical design)
     -Yes                                trả lời Y cho mọi câu hỏi
     -Uninstall                          gỡ watcher (giữ nguyên câu hỏi/trả lời/kiến thức)
@@ -17,6 +18,7 @@ param(
     [ValidateSet('local', 'routine')][string]$Runner = 'local',
     [string]$DataDir = '',
     [string]$OneDriveAccount = 'khuongmat456@gmail.com',
+    [string]$StoreDir = '',
     [string]$RoutineUrl = '',
     [string]$RoutineToken = '',
     [switch]$Yes,
@@ -136,7 +138,7 @@ if ($od) {
     Warn "Chưa thấy OneDrive của $OneDriveAccount (đăng nhập ứng dụng OneDrive bằng tài khoản này rồi chạy lại)."
     Warn "Tạm dùng: $SrcRoot"
 }
-foreach ($d in @('cau_hoi', 'tong_hop', 'kien_thuc', 'du_lieu_gui')) { New-Item -ItemType Directory -Force -Path (Join-Path $Bridge $d) | Out-Null }
+foreach ($d in @('cau_hoi', 'tong_hop', 'kien_thuc', 'so_tay')) { New-Item -ItemType Directory -Force -Path (Join-Path $Bridge $d) | Out-Null }
 try { & attrib +P -U "$Bridge\*" /S /D 2>$null | Out-Null; & attrib +P -U "$Bridge" 2>$null | Out-Null } catch {}   # luôn giữ trên máy
 
 # =============================================================================== 2. PYTHON
@@ -260,6 +262,13 @@ $cfg['data_dir']   = $DataDir
 $cfg['python']     = $py
 $cfg['claude_cmd'] = $claude
 $cfg['runner']     = $Runner
+if (-not $StoreDir) {
+    if ($old -and $old.store_dir) { $StoreDir = $old.store_dir } else { $StoreDir = Join-Path $env:USERPROFILE 'PD_Bridge_Kho' }
+}
+if ($StoreDir -match 'OneDrive') { Warn "Kho đang nằm trong OneDrive ($StoreDir) — nên để ngoài OneDrive." }
+New-Item -ItemType Directory -Force -Path (Join-Path $StoreDir 'du_an') | Out-Null
+$cfg['store_dir']  = $StoreDir
+Ok "Kho project (máy ngoài): $StoreDir"
 if (-not $cfg.Contains('models')) {
     $cfg['models'] = [ordered]@{ nhanh = 'sonnet'; chuan = 'opus'; sau = 'opus'; tong_hop = 'sonnet'; fallback = 'sonnet' }
 }

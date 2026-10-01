@@ -69,13 +69,33 @@ yes if then than so into over under about between after before during vs via per
 VI_STOP = set("""va la co cho cac nhung khi sau truoc trong mot nay thi de ve voi nhu the nao
 gi bao nhieu tai sao o cua duoc bi hay hoac neu vi nen ma rang tu den len xuong ra vao con
 cung da dang se khong chua toi ban minh anh em chi hoi giup xem lam sao the nao giai thich
-so sanh cach dung lenh file thu muc mode nhanh chuan sau""".split())
-VI_TERMS = {  # vài thuật ngữ tiếng Việt thường gặp -> từ khoá tiếng Anh trong tài liệu
-    "độ trễ": "delay", "xung nhịp": "clock", "cây clock": "clock tree", "công suất": "power",
-    "diện tích": "area", "tắc nghẽn": "congestion", "đệm": "buffer", "độ lệch": "skew",
-    "mật độ": "density", "đi dây": "routing", "định tuyến": "routing", "đặt cell": "placement",
-    "rò rỉ": "leakage", "sụt áp": "ir drop", "nhiễu": "noise crosstalk", "chân": "pin",
-    "bất định": "uncertainty", "vi phạm": "violation", "tối ưu": "optimization",
+so sanh cach dung lenh file thu muc mode nhanh chuan sau xung nhip am duong lon nho""".split())
+VI_TERMS = {  # thuật ngữ tiếng Việt -> từ khoá tiếng Anh trong tài liệu
+    "độ trễ": "delay latency", "xung nhịp": "clock", "cây clock": "clock tree", "cây xung": "clock tree",
+    "công suất": "power", "diện tích": "area", "tắc nghẽn": "congestion", "nghẽn": "congestion",
+    "đệm": "buffer", "độ lệch": "skew", "mật độ": "density utilization", "đi dây": "routing route",
+    "định tuyến": "routing route", "đặt cell": "placement place", "sắp đặt": "placement",
+    "rò rỉ": "leakage", "sụt áp": "ir drop", "nhiễu": "noise crosstalk", "xuyên âm": "crosstalk si",
+    "chân": "pin", "cổng": "port", "bất định": "uncertainty", "vi phạm": "violation violated",
+    "tối ưu": "optimization opt", "thời gian thiết lập": "setup", "thời gian giữ": "hold",
+    "đường dữ liệu": "data path", "đường tới hạn": "critical path", "độ dốc": "transition slew",
+    "chuyển mạch": "switching", "tải": "load capacitance", "điện dung": "capacitance",
+    "điện trở": "resistance", "lưới nguồn": "power grid pg", "nguồn": "power", "đất": "ground",
+    "điện di": "electromigration em", "ăng ten": "antenna", "khoảng cách": "spacing", "chập": "short",
+    "hở mạch": "open", "quy tắc thiết kế": "drc", "ràng buộc": "constraint sdc", "góc": "corner",
+    "chế độ": "mode", "thư viện": "library lib", "hạ tầng": "floorplan", "mặt bằng": "floorplan",
+    "macro": "macro", "chèn": "insert", "kích thước": "sizing size", "cổng ngắt xung": "clock gating icg",
+    "đồng bộ": "synchronous", "bất đồng bộ": "asynchronous cdc", "đa ngưỡng": "multi vt",
+    "phân cấp": "hierarchy hierarchical", "khối": "block", "thanh ghi": "register flop",
+}
+EN_SYN = {  # mở rộng viết tắt/đồng nghĩa để tìm được cả tài liệu dùng cách gọi khác
+    "cts": "ccopt clock_tree", "ccopt": "cts", "ocv": "aocv pocv derate", "aocv": "ocv derate",
+    "pocv": "ocv sigma", "drv": "max_tran max_cap max_fanout", "si": "crosstalk noise",
+    "ir": "ir_drop voltage", "em": "electromigration", "util": "utilization density",
+    "congestion": "overflow", "skew": "latency", "uncertainty": "jitter", "sta": "timing",
+    "pnr": "place route", "wns": "slack", "tns": "slack", "icg": "clock_gating",
+    "cppr": "crpr pessimism", "crpr": "cppr pessimism", "ndr": "route_rule non_default",
+    "eco": "eco_mode", "mmmc": "analysis_view corner", "lvs": "netlist", "drc": "violation",
 }
 
 
@@ -116,7 +136,7 @@ def has_vi_diacritics(tok: str) -> bool:
     return strip_accents(tok) != tok
 
 
-def extract_terms(query: str, limit: int = 14) -> list[str]:
+def extract_terms(query: str, limit: int = 18) -> list[str]:
     """Rút từ khoá kỹ thuật từ câu hỏi (bỏ từ tiếng Việt, stopword)."""
     q = query
     extra = []
@@ -146,6 +166,9 @@ def extract_terms(query: str, limit: int = 14) -> list[str]:
                 continue
             terms.append(lp)
     terms.extend(extra)
+    for t in list(terms):
+        if t in EN_SYN:
+            terms.extend(EN_SYN[t].split())
     out, seen = [], set()
     for t in terms:
         if t not in seen:

@@ -91,6 +91,17 @@ if beh == "hang":
 if beh == "slow_ok":
     time.sleep(1.5)
     beh = "ok"
+if beh == "lesson":
+    body = ("## Tóm tắt\n\nCTS và CPPR.\n\n## Lệnh / script đề xuất\n\n```tcl\nccopt_design\n"
+            "set_clock_uncertainty -hold 0.02 [all_clocks]\nfake_cmd_xyz -bogus 1\n```\n\n"
+            "## Bài học\n\n### Khái niệm chính\n- a\n\n### Thuật ngữ\n"
+            "- **CPPR** (Common Path Pessimism Removal): bỏ bi quan phần clock chung\n\n### Lệnh\n"
+            "- `ccopt_design` — chạy CTS\n- `fake_cmd_xyz -bogus` — lệnh bịa để test\n\n"
+            "### Tự kiểm tra\n1. CPPR là gì?\n" + "Chi tiết. " * 30)
+    if target:
+        target.write_text(body, encoding="utf-8")
+    result("XONG")
+    sys.exit(0)
 if beh == "ok":
     q = re.search(r"<<<\n(.*?)\n>>>", prompt, re.S)
     body = ("## Tóm tắt\n\nUncertainty sau CTS nên giảm phần skew, giữ jitter + margin. "

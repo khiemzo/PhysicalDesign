@@ -22,7 +22,8 @@ Bạn chỉ cần tạo một file câu hỏi. Mọi việc còn lại tự đ�
    - **Thư mục**: tạo thư mục `cau_hoi/[sau] hold median/`, bỏ vào đó 1 file câu hỏi `.md` cùng các file dữ liệu.
    - **Cùng tên gốc**: `hold.md` kèm `hold_timing.rpt`, `hold_innovus.log`.
 
-   Script tự tóm tắt report/log (WNS/TNS, top path, ERROR/WARN…) và đưa vào đề bài, nên Claude không tốn token mở file lớn. Dữ liệu được lưu lâu dài ở `du_lieu_gui/Qnnn_<tên>/`.
+   Script tự tóm tắt report/log (WNS/TNS, top path, ERROR/WARN…) và đưa vào đề bài, nên Claude không tốn token mở file lớn. Dữ liệu được chuyển ra **kho trên máy ngoài** (không còn nằm trên OneDrive) và lưu vĩnh viễn.
+2b. **Chọn project** (tuỳ chọn): thêm `@ten_project` vào tên file (ví dụ `[sau] @median_filter hold.md`) hoặc dòng `du_an: median_filter` trong nội dung. Không ghi gì thì script tự nhận theo tên block xuất hiện trong câu hỏi (so với các thư mục trong physical design); không khớp thì vào project `chung`.
 3. Lưu file là xong. **Khoảng 2–3 giây** sau khi file có trên máy ngoài, `Qnnn_traloi.md` xuất hiện với trạng thái "⏳ Đã nhận" và Claude bắt đầu làm. Tên câu hỏi được đổi thành `Qnnn_<tên của bạn>.md`.
    - Đo thực tế: phát hiện file và xác nhận "Đã nhận" sau 2–3 giây. Mode nhanh cho câu trả lời đầy đủ sau khoảng 20–40 giây; mode chuan sau khoảng 2–5 phút.
    - Còn thêm thời gian OneDrive đồng bộ giữa hai máy (thường 5–30 giây). Phần này do OneDrive quyết định, script không điều khiển được.
@@ -38,7 +39,9 @@ Claude tự tìm report, log, script và tài liệu (kể cả Innovus Text Com
 Mọi mode đều cho câu trả lời đầy đủ, không giới hạn độ dài. Mode chỉ quyết định mức độ research.
 Viết `mode: sâu`, `Mode = Nhanh`… cũng được nhận.
 
-Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết** (có số liệu từ report), **Lệnh / script đề xuất**, **Nguồn** (đường dẫn trên máy kèm trang hoặc dòng, và URL web), **Độ tin cậy & cần kiểm chứng**.
+Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết** (có số liệu từ report), **Lệnh / script đề xuất**, **Nguồn** (đường dẫn trên máy kèm trang hoặc dòng, và URL web), **Độ tin cậy & cần kiểm chứng**, **Bài học** (khái niệm chính, thuật ngữ, lệnh, câu tự kiểm tra có đáp án ẩn) và bảng **Kiểm chứng tự động**: script tra từng lệnh trong tài liệu tool trên máy. 📘 nghĩa là có trong tài liệu; 📄 nghĩa là chỉ thấy trong script dự án; ⚠️ nghĩa là chưa kiểm chứng, nên chạy `help <lệnh>` trước khi dùng.
+
+**Hỏi tiếp:** mở `Qnnn_traloi.md`, viết một hoặc nhiều dòng bắt đầu bằng `>>` (ví dụ `>> Nếu skew 0.121 thì sao?`), rồi lưu. Vài giây sau, câu trả lời nối tiếp được chèn vào cùng file, ngay trước phần đánh giá. Claude tiếp tục đúng phiên trước nên không phải đọc lại từ đầu: nhanh và tốn ít token (đo thực tế: 2 lượt, 22 giây).
 
 **Sửa câu hỏi:** mở file câu hỏi **đã được đổi tên** (`Qnnn_...md`), sửa hoặc thêm yêu cầu, rồi lưu. Claude trả lời lại và tận dụng bản cũ: chỉ research phần mới và sửa chỗ bạn đánh giá sai. Bản cũ được giữ ở `Qnnn_traloi_cu.md`.
 
@@ -46,19 +49,36 @@ Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết
 
 **Tổng hợp tuần:** sau 16:55 thứ Sáu, Claude viết `tong_hop/<năm>-W<tuần>.md` và cập nhật `kien_thuc/kinh_nghiem.md`. Nếu lúc đó máy tắt thì khi bật lên sẽ làm bù. Tuần không có câu hỏi thì không tốn token.
 
-## Bộ nhớ: hệ thống nhớ dữ liệu và câu trả lời cũ
+## Kho project, bộ nhớ và học tập
 
-Mọi việc dưới đây do script chạy, không tốn token. Mỗi câu hỏi mới tự được bổ sung 3 loại "bộ nhớ" vào đề bài:
+**Kho project nằm trên máy ngoài** (mặc định `%USERPROFILE%\PD_Bridge_Kho`), không đồng bộ lên OneDrive:
 
-| Bộ nhớ | Nguồn | Tác dụng |
-|---|---|---|
-| **Câu hỏi cũ liên quan** | `tong_hop/nhat_ky.jsonl` (mọi câu đã trả lời) | Đưa kèm tối đa 3 câu cũ gần nhất về chủ đề: câu hỏi, kết luận, đánh giá. Ưu tiên câu `dung`, bỏ câu `sai`. Claude tận dụng thay vì research lại |
-| **Dữ liệu đã gửi trước đây** | `du_lieu_gui/` (có chỉ mục toàn văn riêng) | Tìm report/log/script bạn từng gửi có liên quan, kèm vị trí và đoạn trích. Ví dụ bạn gửi report hold tuần trước, tuần này hỏi lại thì Claude so sánh được |
-| **Kiến thức đã xác nhận** | `kien_thuc/kinh_nghiem.md` | Điều bạn đánh giá `dung` được đưa vào mỗi khi liên quan |
+    PD_Bridge_Kho\du_an\<project>\
+    ├── hoi_dap\        mọi câu hỏi + trả lời, lưu VĨNH VIỄN (Qnnn_traloi.md, các bản cũ Qnnn_traloi_v1.md…)
+    ├── du_lieu\        report/log/script bạn gửi kèm, theo từng Qnnn
+    ├── BOI_CANH.md     bối cảnh project (sửa tay: block, flow, phiên bản tool, mục tiêu…) — Claude đọc ở mọi câu
+    ├── KIEN_THUC.md    kiến thức project; mục ◻️ "chưa xác nhận" do script tự thêm
+    ├── MUC_LUC.md      bảng mọi câu hỏi: ngày, chủ đề, đánh giá, kết luận 1 dòng (tự sinh)
+    └── DONG_THOI_GIAN.md  chỉ số chính mỗi lần gửi report (WNS/TNS, ERROR…) — thấy block tốt lên/xấu đi
 
-- `du_lieu_gui/MUC_LUC.md` là mục lục tự động: mỗi lần gửi có danh sách file và một dòng chỉ số chính (WNS/TNS, số ERROR…).
-- Dữ liệu trong `du_lieu_gui/` **không bị xoá** khi dọn lượt cũ. Muốn bỏ dữ liệu nào thì xoá tay.
-- Cách giúp hệ thống nhớ tốt hơn: đánh giá câu trả lời (`danh_gia: dung/mot_phan/sai`), và ghi thông tin dự án vào `kien_thuc/boi_canh_du_an.md`.
+Trên OneDrive, `cau_hoi/` chỉ còn là hộp thư (giữ 5 lượt gần nhất). Bản đầy đủ luôn nằm trong kho.
+
+**Bộ nhớ đưa vào mỗi câu hỏi** (script làm, 0 token):
+
+| Bộ nhớ | Tác dụng |
+|---|---|
+| Câu hỏi cũ liên quan | Tối đa 3 câu cùng chủ đề (ưu tiên cùng project và câu `dung`, bỏ câu `sai`), kèm kết luận và các lần hỏi tiếp |
+| Trong kho đã có | Tìm toàn văn trong hỏi đáp cũ và dữ liệu đã gửi của mọi project (ưu tiên project hiện tại) |
+| Bối cảnh + kiến thức | `BOI_CANH.md` và `KIEN_THUC.md` của project, `kien_thuc/` chung (✅ đã xác nhận, ◻️ chưa xác nhận) |
+| Từ điển đồng nghĩa | Thuật ngữ Việt → Anh (độ lệch → skew, xung nhịp → clock, nhiễu xuyên âm → crosstalk…) và viết tắt (CTS → ccopt, OCV → AOCV/POCV/derate, DRV → max_tran/max_cap…), giúp tìm đúng tài liệu tiếng Anh. Tìm được cả theo tên block và tên lệnh |
+
+**Tự học:** câu trả lời sau 14 ngày mà không bị đánh giá `sai` được script tự thêm vào mục ◻️ **Chưa xác nhận** trong `KIEN_THUC.md` của project. Claude vẫn dùng lại được các mục này nhưng phải kiểm chứng lại. Nếu sau đó bạn đánh giá `sai` thì mục tự bị gỡ; đánh giá `dung` thì thành ✅ ở lượt tổng hợp tuần.
+
+**Sổ tay (trên OneDrive, để đọc học):** `so_tay/so_lenh.md` gom mọi lệnh Innovus/Tcl, xếp theo nhóm lệnh. `so_tay/thuat_ngu.md` gom các thuật ngữ. Cả hai lấy từ mục Bài học của các câu trả lời, 0 token. Mỗi mục có ký hiệu:
+- ✅: câu nguồn đã được bạn xác nhận đúng.
+- ◻️: chưa xác nhận.
+- 📘 hoặc ⚠️: có hoặc chưa thấy trong tài liệu tool.
+- Kèm danh sách Qnnn nguồn để mở lại.
 
 ## Tốn token thế nào
 
@@ -99,6 +119,7 @@ Mọi việc dưới đây do script chạy, không tốn token. Mỗi câu hỏ
 | 4 | Cho phép tạo **Task Scheduler** cho user hiện tại (nếu công ty chặn, script tự dùng thư mục Startup) | Windows | Bắt buộc (tự động) |
 | 5 | Cài Python, Git for Windows, Claude Code qua winget hoặc trình cài chính thức | Windows | Chỉ khi máy chưa có |
 | 6 | Đọc thư mục `D:\K\K\physical design` (Claude chỉ đọc; quyền ghi bị chặn ở cấp permission) | Máy ngoài | Bắt buộc |
+| 6b | Tạo thư mục kho `%USERPROFILE%\PD_Bridge_Kho` (script tự tạo; đổi chỗ bằng `-StoreDir`) | Máy ngoài | Tự động |
 | 7 | Đổi cài đặt nguồn: gập nắp khi cắm sạc thì không ngủ | `powercfg` (script hỏi) | Nên có |
 | 8 | Quyền ghi GitHub cho Claude (đã có) để cập nhật code PD_Bridge | github.com/apps/claude | Để cập nhật tool |
 
@@ -108,11 +129,11 @@ Trong lúc chạy, Claude Code trên máy ngoài **không hỏi xác nhận gì*
 
     PD_Bridge/
     ├── HUONG_DAN.md · _QUY_TRINH_CLAUDE.md · CLAUDE.md
-    ├── cau_hoi/     câu hỏi và trả lời (giữ 5 lượt mới nhất)
+    ├── cau_hoi/     hộp thư: câu hỏi và trả lời (giữ 5 lượt mới nhất; bản đầy đủ ở kho máy ngoài)
     ├── tong_hop/    nhật ký (nhat_ky.md, nhat_ky.jsonl) và tổng hợp tuần
     ├── kien_thuc/   kinh_nghiem.md (kiến thức ✅ tích luỹ), boi_canh_du_an.md (bối cảnh dự án)
-    ├── du_lieu_gui/ dữ liệu bạn gửi kèm câu hỏi, theo từng Qnnn (+ MUC_LUC.md) — bộ nhớ lâu dài
-    └── tools/       watcher.ps1, cai_dat.ps1, bridge.py, pd_index.py, pd_summarize.py
+    ├── so_tay/      so_lenh.md, thuat_ngu.md (tự gom từ mục Bài học)
+    └── tools/       watcher.ps1, cai_dat.ps1, bridge.py, pd_index.py, pd_summarize.py, pd_store.py
 
 Chỉ mục tìm kiếm nằm ở `D:\K\K\physical design\.pd_index\index.db`. Nó chứa toàn văn PDF (theo trang), HTML, docx, script, report và log. Watcher làm mới chỉ mục mỗi ngày, chỉ đọc lại những file đã thay đổi. Xem số file bằng lệnh `status` bên dưới.
 

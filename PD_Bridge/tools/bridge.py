@@ -46,6 +46,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS_DIR))
 import pd_index  # noqa: E402
 import pd_summarize  # noqa: E402
+import pd_store  # noqa: E402
 
 IS_WIN = os.name == "nt"
 CREATE_NO_WINDOW = 0x08000000 if IS_WIN else 0
@@ -85,7 +86,10 @@ DEFAULTS = {
     "prevent_sleep": True,
     "pre_search_hits": 12,
     "attach_inline_chars": 14000,    # tổng ký tự file đính kèm đưa thẳng vào đề bài
-    "stall_minutes": 5,              # Claude im lặng quá lâu -> coi là treo, chạy lại
+    "stall_minutes": 5,
+    "store_dir": None,               # kho project trên máy ngoài (mặc định %USERPROFILE%\\PD_Bridge_Kho)
+    "auto_learn_days": 14,           # câu trả lời chưa bị đánh giá sai sau N ngày -> ◻️ chưa xác nhận
+    "followup_max_turns": 40,              # Claude im lặng quá lâu -> coi là treo, chạy lại
 }
 MODEL_NAMES = {"opus", "sonnet", "haiku", "fable"}
 
@@ -227,6 +231,57 @@ def display_stem(fname: str) -> str:
     if s.lower() in ("traloi", "traloi_cu"):
         s += "_q"
     return re.sub(r'[<>:"/\\|?*]', "_", s)
+
+
+FU_LINE = re.compile(r"^\s*>>\s?(.*\S.*)$")
+
+
+def _outside_fences(text: str):
+    fence = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            fence = not fence
+        yield line, fence
+
+
+def parse_followups(text: str) -> str:
+    """Các dòng bắt đầu bằng '>>' (ngoài code block) = câu hỏi tiếp chưa trả lời."""
+    out = []
+    for line, fence in _outside_fences(text):
+        m = FU_LINE.match(line)
+        if m and not fence:
+            out.append(m.group(1).strip())
+    return "\n".join(out).strip()
+
+
+def strip_followups(text: str, mark: str | None = None) -> str:
+    lines = []
+    for line, fence in _outside_fences(text):
+        m = FU_LINE.match(line)
+        if m and not fence:
+            if mark:
+                lines.append(mark + m.group(1).strip())
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def escape_followups(body: str) -> str:
+    """Dòng '>>' do Claude viết (ngoài code block) -> '\\>>' để không bị hiểu nhầm là câu hỏi tiếp."""
+    lines = []
+    for line, fence in _outside_fences(body):
+        lines.append(re.sub(r"^(\s*)>>", r"\1\\>>", line) if not fence else line)
+    return "\n".join(lines)
+
+
+def splice_followup(text: str, question: str, body: str, when: str) -> str:
+    """Chèn '## 🔁 Hỏi tiếp' trước phần đánh giá ở cuối file trả lời."""
+    i = text.rfind("\n---\n\n**Đánh giá**")
+    if i < 0:
+        i = len(text)
+    q = "\n".join("> " + l for l in question.splitlines())
+    sec = f"\n\n## 🔁 Hỏi tiếp ({when})\n\n{q}\n\n{body.strip()}\n"
+    return text[:i].rstrip() + sec + text[i:]
 
 
 def summary_section(answer: str, limit: int = 1200) -> str:
@@ -759,7 +814,7 @@ class Bridge:
         self.tong_hop = self.root / "tong_hop"
         self.kien_thuc = self.root / "kien_thuc"
         self.tools = self.root / "tools"
-        self.gui = self.root / "du_lieu_gui"          # file đính kèm người hỏi gửi, lưu lâu dài
+        self.so_tay = self.root / "so_tay"              # sổ tay lệnh/thuật ngữ (đọc trên OneDrive)
         if not (self.tools / "pd_index.py").exists():
             self.tools = TOOLS_DIR
         self.runs = self.home / "runs"
@@ -778,6 +833,25 @@ class Bridge:
         self.last_status = 0.0
         self.last_error = ""
         self.auth_cache: tuple[float, dict] = (0.0, {})
+        sd = cfg.get("store_dir") or str(Path(os.environ.get("USERPROFILE") or Path.home()) / "PD_Bridge_Kho")
+        self.store = pd_store.Store(Path(sd), self.data_dir)
+        self.notebook = pd_store.Notebook(self.store.root / "so_tay.json", self.so_tay)
+        try:
+            n = pd_store.migrate_old_attachments(self.root / "du_lieu_gui", self.store)
+            if n:
+                log.info("Đã chuyển %d mục du_lieu_gui (OneDrive) vào kho máy ngoài %s", n, self.store.root)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Chuyển du_lieu_gui lỗi: %s", e)
+
+    def proj_of(self, qid: str) -> str:
+        return self.state.sub("proj").get(qid, pd_store.DEFAULT_PROJECT)
+
+    def set_proj(self, qid: str, text: str, filename: str) -> str:
+        proj = self.store.detect(text, filename)
+        self.store.pdir(proj)
+        self.state.sub("proj")[qid] = proj
+        self.state.save()
+        return proj
 
     # ------------------------------------------------------------------ paths
     def db_path(self) -> Path | None:
@@ -914,11 +988,12 @@ class Bridge:
             self.state.save()
         self.state.sub("att")[qid] = {"orig": display_stem(p.name)}
         self.state.save()
+        proj = self.set_proj(qid, text, p.name)
         n_att = self.sweep_attachments(qid)
         mode, model = self.resolve_mode(stem, text)
         self.write_placeholder(qid, stem, mode, 1, "queued", status_msg)
-        log.info("Câu hỏi mới: '%s' -> %s (mode %s, model %s%s)", p.name, target.name, mode, model,
-                 f", {n_att} file đính kèm" if n_att else "")
+        log.info("Câu hỏi mới: '%s' -> %s (mode %s, model %s, project %s%s)", p.name, target.name, mode, model,
+                 proj, f", {n_att} file đính kèm" if n_att else "")
         return qid
 
     def claim_dir(self, d: Path, status_msg: str) -> str | None:
@@ -937,8 +1012,9 @@ class Bridge:
         with self.state.lock:
             qid = self.next_id()
             stem = display_stem(d.name)
-            dest = self.gui / f"{qid}_{stem}"
-            self.gui.mkdir(parents=True, exist_ok=True)
+            proj = self.store.detect(text, d.name)
+            dest = self.store.du_lieu_dir(proj, qid, stem)
+            dest.rmdir()
             try:
                 shutil.move(str(d), str(dest))
             except OSError as e:
@@ -952,6 +1028,7 @@ class Bridge:
             atomic_write(self.qdir / f"{qid}_{stem}.md", text)
             self.state.d["last_id"] = qnum(qid)
             self.state.sub("att")[qid] = {"orig": stem, "dir": str(dest)}
+            self.state.sub("proj")[qid] = proj
             self.state.save()
         mode, model = self.resolve_mode(stem, text)
         self.write_placeholder(qid, stem, mode, 1, "queued", status_msg)
@@ -983,7 +1060,7 @@ class Bridge:
                 continue
             if re.match(r"^Q\d{3,}_", f.name) or not f.name.lower().startswith(orig):
                 continue
-            dest = Path(meta.get("dir") or (self.gui / f"{qid}_{orig}"))
+            dest = Path(meta.get("dir") or self.store.du_lieu_dir(self.proj_of(qid), qid, orig))
             dest.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.move(str(f), str(dest / f.name))
@@ -1069,6 +1146,8 @@ class Bridge:
             if st in ("done", "error") and mk.get("hash"):
                 if mk["hash"] != cur and (ignore_debounce or self.ready(qf)):
                     jobs.append((qid, "edit"))
+                elif st == "done" and parse_followups(read_text(a)) and (ignore_debounce or self.ready(a)):
+                    jobs.append((qid, "followup"))
             else:
                 if ignore_debounce or self.ready(qf, 0 if st else None):
                     jobs.append((qid, "answer"))
@@ -1082,24 +1161,28 @@ class Bridge:
             return False
 
     # ------------------------------------------------------------------ prompt
-    def kien_thuc_snippets(self, question: str, limit_chars: int = 2200) -> str:
+    def kien_thuc_snippets(self, question: str, limit_chars: int = 2200, proj: str | None = None) -> str:
         terms = [t.lower() for t in pd_index.extract_terms(question, 20)]
         if not terms:
             return ""
         blocks = []
-        for f in sorted(self.kien_thuc.glob("*.md")):
+        files = sorted(self.kien_thuc.glob("*.md")) + self.store.kien_thuc_files(proj)
+        for f in files:
             if f.name.lower().startswith("boi_canh"):
                 continue
             try:
                 txt = read_text(f)
             except OSError:
                 continue
-            parts = re.split(r"(?m)^(?=#{2,4}\s|- (?:✅|⚠️|❌))", txt)
+            parts = re.split(r"(?m)^(?=#{2,4}\s|- (?:✅|⚠️|❌|◻️))", txt)
             for part in parts:
                 low = part.lower()
                 score = sum(1 for t in terms if t in low)
                 if score:
-                    blocks.append((score, f.name, part.strip()))
+                    name = f.name if f.parent == self.kien_thuc else f"{f.parent.name}/{f.name}"
+                    bonus = 1 if proj and f.parent.name == pd_store.slug(proj) else 0
+                    blocks.append((score + bonus, name, part.strip().replace(pd_store.AUTO_START, "")
+                                   .replace(pd_store.AUTO_END, "")))
         blocks.sort(key=lambda b: -b[0])
         out, size = [], 0
         for score, fn, part in blocks:
@@ -1137,60 +1220,25 @@ class Bridge:
             lines.append(f"{i}. [{h['kind']}] {h['path']}{loc}{snip}")
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------ bộ nhớ dữ liệu đã gửi (0 token)
-    def gui_db(self) -> Path:
-        return self.home / ".pd_index" / "du_lieu_gui.db"
-
+    # ------------------------------------------------------------------ bộ nhớ: kho project (0 token)
     def remember_data(self, qid: str | None = None) -> None:
-        """Đánh chỉ mục du_lieu_gui/ (tăng dần, nhanh) + cập nhật mục lục MUC_LUC.md."""
-        if not self.gui.is_dir():
-            return
+        """Đánh chỉ mục kho (tăng dần) + ghi dòng thời gian cho dữ liệu vừa gửi."""
         try:
-            pd_index.build(self.gui, self.gui_db())
+            self.store.reindex()
         except BaseException as e:  # noqa: BLE001
-            log.warning("Chỉ mục du_lieu_gui lỗi: %s", e)
+            log.warning("Chỉ mục kho lỗi: %s", e)
         d = self.attachments_dir(qid) if qid else None
-        if not d:
-            return
-        cat = self.gui / "MUC_LUC.md"
-        if cat.exists() and f"## {d.name}" in read_text(cat):
-            return
-        qf = next(self.qdir.glob(f"{qid}_*.md"), None)
-        topic = ""
-        if qf and not ANS_RX.match(qf.name):
-            topic = norm_text(parse_mode(read_text(qf), "")[1]).split("\n")[0][:160]
-        lines = [f"\n## {d.name} ({ts_str(fmt='%Y-%m-%d')})", f"Câu hỏi: {topic}"]
-        for f in sorted(d.rglob("*")):
-            if f.is_file():
-                try:
-                    info = pd_summarize.one_line(f) if not pd_index.looks_binary(f.read_bytes()[:4096]) else "nhị phân"
-                except Exception:  # noqa: BLE001
-                    info = "-"
-                lines.append(f"- `{f.relative_to(self.gui).as_posix()}` ({pd_summarize.human(f.stat().st_size)}) — {info[:160]}")
-        if not cat.exists():
-            atomic_write(cat, "# Mục lục dữ liệu đã gửi\n\nTự động cập nhật mỗi khi có câu hỏi kèm dữ liệu.\n")
-        with open(cat, "a", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+        if d:
+            try:
+                self.store.add_timeline(self.proj_of(qid), qid, sorted(f for f in d.rglob("*") if f.is_file()))
+            except Exception as e:  # noqa: BLE001
+                log.warning("Dòng thời gian lỗi: %s", e)
 
-    def search_gui(self, question: str, exclude: Path | None = None, n: int = 6) -> str:
-        db = self.gui_db()
-        if not db.exists():
-            return ""
-        try:
-            hits = pd_index.search(db, question, n=n + 6)
-        except BaseException:  # noqa: BLE001
-            return ""
-        ex = exclude.name + "/" if exclude else None
-        out = []
-        for h in hits:
-            if ex and h["path"].startswith(ex) or h["path"] == "MUC_LUC.md":
-                continue
-            loc = (" [" + ", ".join(h["locs"][:2]) + "]") if h["locs"] else ""
-            snip = (" — " + h["snippet"][:140]) if h["snippet"] else ""
-            out.append(f"- du_lieu_gui/{h['path']}{loc}{snip}")
-            if len(out) >= n:
-                break
-        return "\n".join(out)
+    def search_gui(self, question: str, qid: str, n: int = 6) -> str:
+        proj = self.proj_of(qid)
+        d = self.attachments_dir(qid)
+        ex = [f"/hoi_dap/{qid}_"] + ([f"/du_lieu/{d.name}/"] if d else [])
+        return "\n".join(self.store.search(question, proj, ex, n))
 
     def related_history(self, qid: str, question: str, n: int = 3) -> str:
         """Câu hỏi cũ liên quan (từ nhat_ky.jsonl): câu hỏi, tóm tắt trả lời, đánh giá, file."""
@@ -1200,7 +1248,11 @@ class Bridge:
         latest: dict[str, dict] = {}
         ratings: dict[str, str] = {}
         for r in self.read_journal():
-            if r.get("type") == "answer" and r.get("q") != qid and r.get("status") == "done":
+            if r.get("type") in ("answer", "followup") and r.get("q") != qid and r.get("status", "done") == "done":
+                if r.get("type") == "followup" and r["q"] in latest:
+                    latest[r["q"]] = dict(latest[r["q"]], summary=latest[r["q"]].get("summary", "")
+                                          + " | Hỏi tiếp: " + r.get("question", "")[:150])
+                    continue
                 latest[r["q"]] = r
             elif r.get("type") == "rating":
                 ratings[f"{r['q']}:{r['v']}"] = r.get("danh_gia", "chua")
@@ -1208,16 +1260,17 @@ class Bridge:
         for q, r in latest.items():
             blob = (r.get("name", "") + " " + r.get("question", "") + " " + r.get("summary", "")).lower()
             sc = sum(1 for t in terms if t in blob)
-            rating = ratings.get(f"{q}:{r['v']}", "chua")
+            rating = ratings.get(f"{q}:{r.get('v', 1)}", "chua")
+            same = r.get("proj", pd_store.DEFAULT_PROJECT) == self.proj_of(qid)
             if sc >= 2 and rating != "sai":
-                scored.append((sc + (2 if rating == "dung" else 0), q, r, rating))
+                scored.append((sc + (2 if rating == "dung" else 0) + (2 if same else 0), q, r, rating))
         scored.sort(key=lambda x: (-x[0], -qnum(x[1])))
         out = []
         for _, q, r, rating in scored[:n]:
-            a = self.qdir / f"{q}_traloi.md"
+            a = self.store.answer_path(r.get("proj", pd_store.DEFAULT_PROJECT), q) or self.qdir / f"{q}_traloi.md"
             mark = {"dung": "✅ đã xác nhận đúng", "mot_phan": "◑ đúng một phần"}.get(rating, "chưa đánh giá")
             d = self.attachments_dir(q)
-            out.append(f"- {q} ({r.get('ts', '')[:10]}, {mark}) — {r.get('name', '')}\n"
+            out.append(f"- {q} [{r.get('proj', pd_store.DEFAULT_PROJECT)}] ({r.get('ts', '')[:10]}, {mark}) — {r.get('name', '')}\n"
                        f"  Hỏi: {r.get('question', '')[:220]}\n"
                        f"  Kết luận: {r.get('summary', '')[:500]}\n"
                        f"  File: {a if a.exists() else '(đã lưu trữ)'}{' · dữ liệu: ' + str(d) if d else ''}")
@@ -1250,15 +1303,18 @@ class Bridge:
         att = self.attachment_context(qid)
         search_text = question + " " + parse_prefix(stem)[2]
         hist = self.related_history(qid, search_text)
-        gui_hits = self.search_gui(search_text, self.attachments_dir(qid))
+        gui_hits = self.search_gui(search_text, qid)
+        proj = self.proj_of(qid)
+        pbc = self.store.boi_canh(proj)
         tools = self.tools
         py = Path(self.cfg.get("python") or sys.executable).stem.lower()   # python (Windows) / python3
         if py not in ("python", "python3", "py"):
             py = "python"
-        kt = self.kien_thuc_snippets(question)
+        kt = self.kien_thuc_snippets(question, proj=proj)
         bc = self.boi_canh()
         parts = [
             f"Câu hỏi {qid} ({stem}) từ PD_Bridge. Làm theo quy trình trong CLAUDE.md.",
+            f"PROJECT: {proj} — kho lưu trữ trên máy: {self.store.pdir(proj)} (hỏi đáp cũ, dữ liệu đã gửi; đọc khi cần)",
             f"MODE: {self.MODE_TEXT[mode]}",
         ]
         if raw_mode:
@@ -1278,14 +1334,17 @@ class Bridge:
         if hist:
             parts += ["", "CÂU HỎI CŨ LIÊN QUAN ĐÃ TRẢ LỜI (bộ nhớ — tận dụng, không research lại phần đã chắc chắn):", hist]
         if gui_hits:
-            parts += ["", f"DỮ LIỆU NGƯỜI HỎI ĐÃ GỬI TRƯỚC ĐÂY có liên quan (thư mục {self.gui}; mục lục: du_lieu_gui/MUC_LUC.md):",
+            parts += ["", f"TRONG KHO ĐÃ CÓ (dữ liệu đã gửi + hỏi đáp cũ; gốc kho/du_an = {self.store.du_an}):",
                       gui_hits]
         if att:
             parts += ["", "DỮ LIỆU NGƯỜI HỎI GỬI KÈM (ưu tiên phân tích; đã tóm tắt sẵn, mở file gốc khi cần chi tiết):", att]
         if bc:
-            parts += ["", "BỐI CẢNH DỰ ÁN (kien_thuc/boi_canh_du_an.md):", bc]
+            parts += ["", "BỐI CẢNH CHUNG (kien_thuc/boi_canh_du_an.md):", bc]
+        if pbc:
+            parts += ["", f"BỐI CẢNH PROJECT {proj} (BOI_CANH.md):", pbc]
         if kt:
-            parts += ["", "KIẾN THỨC TÍCH LUỸ LIÊN QUAN (✅ = đã được xác nhận đúng; ❌ = đã bị đánh giá sai, tránh lặp):", kt]
+            parts += ["", "KIẾN THỨC TÍCH LUỸ LIÊN QUAN (✅ = đã xác nhận đúng; ◻️ = chưa xác nhận, dùng có kiểm chứng; "
+                          "❌ = đã bị đánh giá sai, tránh lặp):", kt]
         if edit:
             parts += ["", f"ĐÂY LÀ CÂU HỎI ĐÃ SỬA (lần {edit['v']}). Bản trả lời trước: {edit['old_path']}"
                           f" (đánh giá: {edit['rating']}{'; ghi chú: ' + edit['note'] if edit['note'] else ''}).",
@@ -1322,6 +1381,8 @@ class Bridge:
     # ------------------------------------------------------------------ process
     def process(self, qid: str, kind: str, chat: bool = False) -> dict | None:
         """Chạy 1 câu hỏi. chat=True: chỉ chuẩn bị (claim) cho chế độ chat, không gọi claude."""
+        if kind == "followup":
+            return None if chat else self.process_followup(qid)
         _, rounds = self.scan()
         r = rounds.get(qid, {})
         qf: Path | None = r.get("q")
@@ -1379,8 +1440,88 @@ class Bridge:
             res = self.run_routine(prompt, answer_tmp, mode)
         else:
             res = self.run_with_fallback(prompt, mode, model, run_dir, answer_tmp, job=mode,
-                                         extra_dirs=[self.attachments_dir(qid)])
+                                         extra_dirs=[self.attachments_dir(qid), self.store.du_an])
         return self.handle_result(info, res, model)
+
+    def process_followup(self, qid: str) -> dict | None:
+        """'>> câu hỏi tiếp' trong file trả lời -> trả lời nối tiếp (tiếp tục phiên cũ: ngữ cảnh đã có, rẻ)."""
+        _, rounds = self.scan()
+        r = rounds.get(qid, {})
+        a, qf = r.get("a"), r.get("q")
+        if not a or not qf:
+            return None
+        text = read_text(a)
+        fu = parse_followups(text)
+        if not fu:
+            return None
+        stem = Q_RX.match(qf.name).group(2)
+        qraw = read_text(qf)
+        mode, model = self.resolve_mode(stem, qraw)
+        proj = self.proj_of(qid)
+        run_dir = self.runs / f"{qid}-fu-{ts_str(fmt='%Y%m%d-%H%M%S')}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        answer_tmp = run_dir / "answer.md"
+        arch = self.store.answer_path(proj, qid) or a
+        sid = self.state.sub("sessions").get(qid)
+        prompt = "\n".join([
+            f"HỎI TIẾP cho {qid} ({stem}), project {proj}. Làm theo CLAUDE.md (mục Hỏi tiếp).",
+            f"Câu trả lời trước (toàn bộ, kể cả các lần hỏi tiếp): {arch}",
+            "Câu hỏi gốc:", "<<<", parse_mode(qraw, "")[1][:1500], ">>>", "",
+            "HỎI TIẾP:", "<<<", fu, ">>>", "",
+            "Trả lời đúng trọng tâm phần hỏi tiếp, không lặp lại phần đã trả lời (dẫn chiếu nếu cần); vẫn tìm "
+            "trên máy/web khi cần số liệu mới. Có '## Bài học' nếu có khái niệm/lệnh mới.",
+            f"Ghi câu trả lời (Markdown) vào file: {answer_tmp}",
+            "Cuối cùng chỉ in: XONG",
+        ])
+        self.cur_job = None
+        log.info("%s: hỏi tiếp (%s) — %s", qid, "tiếp tục phiên cũ" if sid else "phiên mới", fu[:80])
+        res = self.run_with_fallback(prompt, mode, model, run_dir, answer_tmp, job=mode,
+                                     extra_dirs=[self.attachments_dir(qid), self.store.du_an],
+                                     resume=sid, max_turns=int(self.cfg.get("followup_max_turns", 40)))
+        fails = self.state.sub("fu_fail")
+        if not self.answer_ok(answer_tmp):
+            if res.kind == "limit":
+                self.state.set("paused_until", res.reset_at or now() + 1800)
+                self.state.set("pause_reason", "limit")
+                return {"qid": qid, "status": "limit"}
+            fails[qid] = fails.get(qid, 0) + 1
+            self.state.save()
+            log.error("%s: hỏi tiếp lỗi (%s, lần %d): %s", qid, res.kind, fails[qid], res.text[:200])
+            self.last_error = f"{qid} hỏi tiếp: {res.kind}"
+            if fails[qid] >= int(self.cfg.get("max_attempts", 3)):
+                cur = read_text(a)
+                atomic_write(a, strip_followups(cur, mark="**🔁 Hỏi tiếp (lỗi — thêm lại dòng `>>` để thử lại):** "))
+                fails.pop(qid, None)
+                self.state.save()
+            else:
+                self.state.sub("retry")[qid] = {"n": fails[qid], "next": now() + 60 * fails[qid]}
+                self.state.save()
+            return {"qid": qid, "status": "error"}
+        body = MARK_RX.sub("", read_text(answer_tmp)).strip()
+        body = re.sub(r"\n?XONG\s*$", "", body).rstrip()
+        body = escape_followups(RATING_RX.sub("", body))
+        verified: dict = {}
+        try:
+            ver, verified = pd_store.verify_commands(body, self.db_path())
+            body += ver
+        except Exception:  # noqa: BLE001
+            pass
+        cur = read_text(a)                                    # đọc lại: giữ đánh giá người hỏi vừa sửa
+        new = splice_followup(strip_followups(cur), fu, body, ts_str())
+        atomic_write(a, new)
+        if res.session_id:
+            self.state.sub("sessions")[qid] = res.session_id
+        fails.pop(qid, None)
+        self.state.sub("retry").pop(qid, None)
+        self.state.save()
+        mk = parse_marker(new)
+        self.after_answer(qid, proj, stem, new, int(mk.get("v", 1)), body, verified)
+        self.journal({"type": "followup", "q": qid, "v": int(mk.get("v", 1)), "proj": proj,
+                      "ts": ts_str(fmt="%Y-%m-%d %H:%M:%S"), "t": now(), "question": fu[:800],
+                      "summary": summary_section(body, 600)})
+        self.render_learning(proj)
+        log.info("%s: XONG hỏi tiếp", qid)
+        return {"qid": qid, "status": "done"}
 
     def preflight(self) -> str | None:
         """Kiểm tra đăng nhập (0 token). -> None nếu ổn, ngược lại lý do."""
@@ -1399,9 +1540,10 @@ class Bridge:
         return None
 
     def run_with_fallback(self, prompt: str, mode: str, model: str, run_dir: Path, answer_tmp: Path,
-                          job: str, extra_dirs: list | None = None) -> RunResult:
+                          job: str, extra_dirs: list | None = None, resume: str | None = None,
+                          max_turns: int | None = None) -> RunResult:
         cwd = self.root
-        add_dirs = [d for d in (self.data_dir, run_dir, self.tools, self.gui, *(extra_dirs or []))
+        add_dirs = [d for d in (self.data_dir, run_dir, self.tools, *(extra_dirs or []))
                     if d and Path(d).exists()]
         deny = [self.data_dir] if self.data_dir else []
         allowed = self.allowed_tools(web=True)
@@ -1419,7 +1561,12 @@ class Bridge:
                                    f"_Tự cập nhật mỗi {int(float(self.cfg.get('progress_seconds', 10)))} giây. "
                                    f"Nếu Claude im lặng quá {self.cfg.get('stall_minutes', 5)} phút, hệ thống tự chạy lại._")
 
-        res = self.runner.run(prompt, model, job, cwd, add_dirs, deny, allowed, run_dir, on_progress=progress)
+        res = self.runner.run(prompt, model, job, cwd, add_dirs, deny, allowed, run_dir, on_progress=progress,
+                              resume=resume, max_turns=max_turns)
+        if resume and not res.ok and res.kind not in ("limit", "login") and not self.answer_ok(answer_tmp):
+            log.info("   không tiếp tục được phiên cũ -> chạy phiên mới")
+            res = self.runner.run(prompt, model, job, cwd, add_dirs, deny, allowed, run_dir, tag="_new",
+                                  on_progress=progress, max_turns=max_turns)
         fb = self.cfg["models"].get("fallback", "sonnet")
         if res.kind == "limit" and model_short(model) != model_short(fb):
             log.warning("   hết hạn mức %s -> chuyển %s", model_short(model), fb)
@@ -1474,6 +1621,7 @@ class Bridge:
             note = ""
             if res.kind == "max_turns":
                 note = " · ⚠️ hết số lượt, có thể chưa đầy đủ"
+            info["sid"] = res.session_id
             self.finalize(info, body, res.model or model, note)
             with self.state.lock:
                 retry.pop(qid, None)
@@ -1526,7 +1674,15 @@ class Bridge:
         body = MARK_RX.sub("", body).strip()
         body = re.sub(r"\n?XONG\s*$", "", body).rstrip()
         # bỏ dòng đánh giá nếu Claude tự thêm (tránh trùng)
-        body = RATING_RX.sub("", body)
+        body = escape_followups(RATING_RX.sub("", body))
+        body = re.sub(r"\n## Kiểm chứng tự động \(script.*?(?=\n## |\Z)", "", body, flags=re.S).rstrip()
+        verified: dict = {}
+        if status == "done":
+            try:
+                ver, verified = pd_store.verify_commands(body, self.db_path())
+                body += ver
+            except Exception as e:  # noqa: BLE001
+                log.warning("Kiểm chứng lệnh lỗi: %s", e)
         header = (f"# {qid} — {stem}\n\n"
                   f"> mode: **{mode}** · model: {model_short(model)} · {ts_str()} · {mins} phút"
                   f"{' · lần ' + str(v) if v > 1 else ''}{note}\n\n")
@@ -1537,15 +1693,56 @@ class Bridge:
                   f"model={model_short(model)} -->\n")
         atomic_write(self.qdir / f"{qid}_traloi.md", header + body + footer)
         self.state.sub("last_q")[qid] = {"text": info["question"][:6000], "hash": info["hash"], "v": v}
+        if info.get("sid"):
+            self.state.sub("sessions")[qid] = info["sid"]
         self.state.save()
+        proj = self.proj_of(qid)
+        self.after_answer(qid, proj, stem, header + body + footer, v, body, verified)
         rec = {"type": "answer", "q": qid, "v": v, "ts": ts_str(fmt="%Y-%m-%d %H:%M:%S"), "t": now(),
                "name": stem, "mode": mode, "model": model_short(model), "status": status, "minutes": mins,
+               "proj": proj,
                "question": info["question"][:1500], "summary": summary_section(body)}
         self.journal(rec)
         with open(self.tong_hop / "nhat_ky.md", "a", encoding="utf-8") as f:
             f.write(f"- {ts_str()} **{qid}** v{v} [{mode}/{model_short(model)}, {mins}′] {stem}"
                     f"{' — ❌ lỗi' if status == 'error' else ''}\n")
-        log.info("%s: %s -> %s_traloi.md (%d phút)", qid, "XONG" if status == "done" else "LỖI", qid, mins)
+        log.info("%s: %s -> %s_traloi.md (%d phút, project %s)", qid, "XONG" if status == "done" else "LỖI",
+                 qid, mins, proj)
+        self.render_learning(proj)
+
+    def after_answer(self, qid: str, proj: str, stem: str, full_text: str, v: int, body: str,
+                     verified: dict) -> None:
+        """Lưu kho (vĩnh viễn) + gom sổ tay. 0 token."""
+        try:
+            qf = next((f for f in self.qdir.glob(f"{qid}_*.md") if Q_RX.match(f.name)
+                       and not ANS_RX.match(f.name) and not OLD_RX.match(f.name)), None)
+            self.store.archive(proj, qid, stem, read_text(qf) if qf else "", full_text, v)
+            terms, cmds = pd_store.lesson_items(body)
+            if terms or cmds:
+                self.notebook.add(qid, terms, cmds, verified)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Lưu kho/sổ tay lỗi: %s", e)
+
+    def latest_ratings(self) -> dict[str, str]:
+        rv: dict[str, int] = {}
+        out: dict[str, str] = {}
+        recs = self.read_journal()
+        for r in recs:
+            if r.get("type") == "answer":
+                rv[r["q"]] = int(r.get("v", 1))
+        for r in recs:
+            if r.get("type") == "rating" and int(r.get("v", 1)) == rv.get(r["q"]):
+                out[r["q"]] = r.get("danh_gia", "chua")
+        return out
+
+    def render_learning(self, proj: str | None = None) -> None:
+        try:
+            recs = self.read_journal()
+            for p in ([proj] if proj else self.store.projects()):
+                self.store.render_muc_luc(p, recs)
+            self.notebook.render(self.latest_ratings())
+        except Exception as e:  # noqa: BLE001
+            log.warning("Cập nhật mục lục/sổ tay lỗi: %s", e)
 
     def journal(self, rec: dict) -> None:
         with open(self.tong_hop / "nhat_ky.jsonl", "a", encoding="utf-8") as f:
@@ -1565,6 +1762,14 @@ class Bridge:
         self.journal({"type": "rating", "q": qid, "v": v, "danh_gia": rating, "ghi_chu": note,
                       "file": file, "ts": ts_str(fmt="%Y-%m-%d %H:%M:%S"), "t": now()})
         log.info("%s v%d: đánh giá = %s%s", qid, v, rating, f" ({note})" if note else "")
+        a = self.qdir / f"{qid}_traloi.md"
+        if file == "traloi" and a.exists():
+            try:
+                hd = self.store.pdir(self.proj_of(qid)) / "hoi_dap" / f"{qid}_traloi.md"
+                atomic_write(hd, read_text(a))
+            except Exception:  # noqa: BLE001
+                pass
+        self.render_learning(self.proj_of(qid))
 
     # ------------------------------------------------------------------ routine runner (dự phòng)
     def run_routine(self, prompt: str, answer_tmp: Path, job: str) -> RunResult:
@@ -1710,6 +1915,9 @@ class Bridge:
             self.purge_trash()
             self.prune_runs()
             self.refresh_ratings()
+            n = self.store.auto_learn(self.read_journal(), now(), int(self.cfg.get("auto_learn_days", 14)))
+            if n:
+                log.info("Tự học: %d mục ◻️ chưa xác nhận trong KIEN_THUC.md của các project", n)
         except Exception as e:  # noqa: BLE001
             log.warning("housekeeping: %s", e)
 
@@ -1812,7 +2020,7 @@ class Bridge:
             rating, note = vr[-1][1]
             cnt[rating if rating in cnt else "chua"] += 1
             older = "; ".join(f"v{v}={rt[0]}" + (f" ({rt[1]})" if rt[1] else "") for v, rt in vr[:-1])
-            loc = self.qdir / f"{qid}_traloi.md"
+            loc = self.store.answer_path(r.get("proj", pd_store.DEFAULT_PROJECT), qid) or self.qdir / f"{qid}_traloi.md"
             digest.append(
                 f"### {qid} — {r['name']} (v{r['v']}, {r['mode']}/{r['model']}, danh_gia: {rating}"
                 f"{', ghi_chu: ' + note if note else ''}{', bản trước: ' + older if older else ''})\n"
@@ -2069,6 +2277,12 @@ class Bridge:
                 continue
             if not self.pending_jobs(rounds, now_flag) and \
                     (not self.weekly_due() or getattr(self, "_weekly_tried", False)):
+                deb = float(self.cfg.get("debounce_seconds", 2))
+                fresh = [f for r in rounds.values() for f in (r.get("q"), r.get("a"))
+                         if f and f.exists() and now() - f.stat().st_mtime < deb + 1]
+                if fresh and not now_flag:
+                    time.sleep(float(self.cfg.get("poll_seconds", 1)))   # file vừa sửa: chờ ổn định
+                    continue
                 break
 
     def status(self) -> str:
@@ -2195,6 +2409,8 @@ def main(argv=None) -> int:
         _, rounds = b.scan()
         items = []
         for qid, kind in b.pending_jobs(rounds, ignore_debounce=True):
+            if kind == "followup":
+                continue
             info = b.process(qid, kind, chat=True)
             if info:
                 items.append(info)

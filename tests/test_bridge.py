@@ -32,7 +32,9 @@ class Env:
         fake = self.tmp / "claude"
         fake.write_text(f"#!/bin/sh\nexec {sys.executable} {REPO / 'tests' / 'fake_claude.py'} \"$@\"\n")
         fake.chmod(0o755)
+        self.kho = self.tmp / "kho"
         cfg = {"bridge_dir": str(self.root), "data_dir": str(self.data), "claude_cmd": str(fake),
+               "store_dir": str(self.kho),
                "debounce_seconds": DEB, "poll_seconds": 0.1}
         cfg.update(cfg_over)
         (self.home / "config.json").write_text(json.dumps(cfg))
@@ -395,7 +397,7 @@ class T(unittest.TestCase):
             os.utime(f, (t, t))
         self.e.run(self.b)
         self.assertTrue((self.e.q / "Q001_[nhanh] hold median.md").exists())
-        gui = self.e.root / "du_lieu_gui" / "Q001_[nhanh] hold median"
+        gui = self.e.kho / "du_an" / "chung" / "du_lieu" / "Q001_[nhanh] hold median"
         self.assertTrue((gui / "hold.tarpt").exists())
         self.assertFalse(d.exists())
         p = self.e.calls()[0]["prompt"]
@@ -409,7 +411,7 @@ class T(unittest.TestCase):
         self.e.ask("hold.md", "Xem log đính kèm")
         (self.e.q / "hold_innovus.log").write_text("**ERROR: (IMPCCOPT-1209): skew\n" * 3)
         self.e.run(self.b)
-        self.assertTrue((self.e.root / "du_lieu_gui" / "Q001_hold" / "hold_innovus.log").exists())
+        self.assertTrue((self.e.kho / "du_an" / "chung" / "du_lieu" / "Q001_hold" / "hold_innovus.log").exists())
         self.assertIn("IMPCCOPT-1209", self.e.calls()[0]["prompt"])
 
     def test_23_memory_history_and_sent_data(self):
@@ -425,7 +427,7 @@ class T(unittest.TestCase):
         a = self.ans("Q001").replace("danh_gia: chua", "danh_gia: dung")
         (self.e.q / "Q001_traloi.md").write_text(a, encoding="utf-8")
         self.b.refresh_ratings()
-        cat = (self.e.root / "du_lieu_gui" / "MUC_LUC.md").read_text(encoding="utf-8")
+        cat = (self.e.kho / "du_an" / "median_filter" / "DONG_THOI_GIAN.md").read_text(encoding="utf-8")
         self.assertIn("hold_0930.tarpt", cat)
         self.assertIn("WNS", cat)
         self.e.ask("q2.md", "Hold median_filter sau CTS vẫn âm, so sánh với report tuần trước (VIOLATED reg2reg)")
@@ -434,14 +436,17 @@ class T(unittest.TestCase):
         self.assertIn("CÂU HỎI CŨ LIÊN QUAN", p)
         self.assertIn("Q001", p)
         self.assertIn("✅ đã xác nhận đúng", p)
-        self.assertIn("DỮ LIỆU NGƯỜI HỎI ĐÃ GỬI TRƯỚC ĐÂY", p)
+        self.assertIn("TRONG KHO ĐÃ CÓ", p)
         self.assertIn("hold_0930.tarpt", p)
-        self.assertIn(str(self.e.root / "du_lieu_gui"), self.e.calls()[-1]["args"])
+        self.assertIn(str(self.e.kho / "du_an"), self.e.calls()[-1]["args"])
+        self.assertIn("PROJECT: median_filter", p)
         # dọn lượt cũ không xoá dữ liệu đã gửi
         self.b.cfg["keep_rounds"] = 0
         _, rounds = self.b.scan()
         self.b.retention(rounds)
-        self.assertTrue((self.e.root / "du_lieu_gui" / "Q001_hold median" / "hold_0930.tarpt").exists())
+        self.assertTrue((self.e.kho / "du_an" / "median_filter" / "du_lieu" / "Q001_hold median" / "hold_0930.tarpt").exists())
+        self.assertTrue((self.e.kho / "du_an" / "median_filter" / "hoi_dap" / "Q001_traloi.md").exists(),
+                        "kho giữ vĩnh viễn dù OneDrive đã dọn")
 
     def test_24_wrong_answers_not_reused(self):
         self.e.ask("q.md", "clock gating check setup hold ICG")
@@ -540,6 +545,99 @@ class T(unittest.TestCase):
             if rt:
                 rt["next"] = 0
         self.assertIn("status=done", self.ans())
+
+    def test_33_project_archive_and_index(self):
+        self.e.ask("hold.md", "Hold âm ở block median_filter sau CTS?")
+        self.e.ask("@pcie_top clock.md", "clock gating của pcie?", age=9)
+        self.e.ask("chung.md", "STA là gì?", age=8)
+        self.e.run(self.b, 6)
+        pr = self.b.state.sub("proj")
+        self.assertEqual((pr["Q001"], pr["Q002"], pr["Q003"]), ("median_filter", "pcie_top", "chung"))
+        hd = self.e.kho / "du_an" / "median_filter" / "hoi_dap"
+        self.assertTrue((hd / "Q001_hold.md").exists())
+        self.assertIn("status=done", (hd / "Q001_traloi.md").read_text(encoding="utf-8"))
+        ml = (self.e.kho / "du_an" / "median_filter" / "MUC_LUC.md").read_text(encoding="utf-8")
+        self.assertIn("| Q001 |", ml)
+        self.assertTrue((self.e.kho / "du_an" / "median_filter" / "BOI_CANH.md").exists())
+        self.assertIn(str(self.e.data / "median_filter"), (self.e.kho / "du_an" / "median_filter" / "BOI_CANH.md").read_text())
+        # sửa câu hỏi -> bản cũ được giữ trong kho
+        (self.e.q / "Q001_hold.md").write_text("Hold âm ở block median_filter sau CTS? thêm OCV", encoding="utf-8")
+        self.b.tick(block=True)
+        time.sleep(DEB + 0.2)
+        self.e.run(self.b)
+        self.assertTrue((hd / "Q001_traloi_v1.md").exists())
+        self.assertIn("v=2", (hd / "Q001_traloi.md").read_text(encoding="utf-8"))
+
+    def test_34_followup_in_answer_file(self):
+        self.e.ask("q.md", "Hold sau CTS?")
+        self.e.run(self.b)
+        a = self.e.q / "Q001_traloi.md"
+        t = a.read_text(encoding="utf-8").replace("danh_gia: chua", "danh_gia: dung")
+        a.write_text(t + "\n>> Vậy với OCV thì sao?\n", encoding="utf-8")
+        self.e.run(self.b)
+        self.assertEqual(len(self.e.calls()), 1, "chờ file ổn định")
+        time.sleep(DEB + 0.2)
+        self.e.run(self.b)
+        c = self.e.calls()
+        self.assertEqual(len(c), 2)
+        self.assertIn("HỎI TIẾP", c[1]["prompt"])
+        self.assertIn("Vậy với OCV thì sao?", c[1]["prompt"])
+        self.assertTrue(c[1]["resume"], "tiếp tục phiên cũ (rẻ hơn)")
+        t2 = a.read_text(encoding="utf-8")
+        self.assertIn("## 🔁 Hỏi tiếp", t2)
+        self.assertIn("> Vậy với OCV thì sao?", t2)
+        self.assertNotIn("\n>> ", t2)
+        self.assertIn("danh_gia: dung", t2, "giữ đánh giá người hỏi")
+        self.assertLess(t2.index("## 🔁 Hỏi tiếp"), t2.index("**Đánh giá**"))
+        self.e.run(self.b)
+        self.assertEqual(len(self.e.calls()), 2, "không trả lời lặp")
+        kho = (self.e.kho / "du_an" / "chung" / "hoi_dap" / "Q001_traloi.md").read_text(encoding="utf-8")
+        self.assertIn("## 🔁 Hỏi tiếp", kho)
+
+    def test_35_lesson_notebook_and_verification(self):
+        self.e.script("lesson")
+        self.e.ask("q.md", "CTS và CPPR?")
+        self.e.run(self.b)
+        a = self.ans()
+        self.assertIn("Kiểm chứng tự động", a)
+        self.assertIn("`ccopt_design` | 📘", a)
+        self.assertIn("`fake_cmd_xyz` | ⚠️", a)
+        sl = (self.e.root / "so_tay" / "so_lenh.md").read_text(encoding="utf-8")
+        self.assertIn("ccopt_design", sl)
+        self.assertIn("◻️ 📘 `ccopt_design`", sl)
+        self.assertIn("⚠️ `fake_cmd_xyz", sl)
+        tn = (self.e.root / "so_tay" / "thuat_ngu.md").read_text(encoding="utf-8")
+        self.assertIn("**CPPR", tn)
+        (self.e.q / "Q001_traloi.md").write_text(a.replace("danh_gia: chua", "danh_gia: dung"), encoding="utf-8")
+        self.b.refresh_ratings()
+        self.assertIn("✅ 📘 `ccopt_design`", (self.e.root / "so_tay" / "so_lenh.md").read_text(encoding="utf-8"))
+        self.assertIn("✅ **CPPR", (self.e.root / "so_tay" / "thuat_ngu.md").read_text(encoding="utf-8"))
+
+    def test_36_auto_learn_after_14_days(self):
+        self.e.ask("q.md", "Hold block median_filter sau CTS?")
+        self.e.run(self.b)
+        kt = self.e.kho / "du_an" / "median_filter" / "KIEN_THUC.md"
+        self.b.store.auto_learn(self.b.read_journal(), time.time())
+        self.assertNotIn("◻️ (Q001", kt.read_text(encoding="utf-8"), "chưa đủ 14 ngày")
+        self.b.store.auto_learn(self.b.read_journal(), time.time() + 15 * 86400)
+        self.assertIn("◻️ (Q001", kt.read_text(encoding="utf-8"))
+        a = self.ans().replace("danh_gia: chua", "danh_gia: sai")
+        (self.e.q / "Q001_traloi.md").write_text(a, encoding="utf-8")
+        self.b.refresh_ratings()
+        self.b.store.auto_learn(self.b.read_journal(), time.time() + 15 * 86400)
+        self.assertNotIn("◻️ (Q001", kt.read_text(encoding="utf-8"), "bị đánh giá sai -> bỏ")
+        self.e.ask("q2.md", "median_filter hold CTS uncertainty?")
+        self.b.state.sub("ratings").clear()
+
+    def test_37_synonyms_and_block_search(self):
+        import pd_index
+        t = pd_index.extract_terms("độ lệch xung nhịp, nhiễu xuyên âm và OCV")
+        for w in ("skew", "clock", "crosstalk", "aocv", "derate"):
+            self.assertIn(w, t)
+        self.e.ask("q.md", "Vì sao CTS của median_filter bị lệch nhiều?")
+        self.e.run(self.b)
+        p = self.e.calls()[0]["prompt"]
+        self.assertIn("ccopt", p.split("GỢI Ý TỪ CHỈ MỤC")[1][:3000].lower())
 
 
 class TWatch(unittest.TestCase):

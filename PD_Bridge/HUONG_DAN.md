@@ -25,7 +25,8 @@ Bạn chỉ cần tạo một file câu hỏi. Mọi việc còn lại tự đ�
    Script tự tóm tắt report/log (WNS/TNS, top path, ERROR/WARN…) và đưa vào đề bài, nên Claude không tốn token mở file lớn. Dữ liệu được chuyển ra **kho trên máy ngoài** (không còn nằm trên OneDrive) và lưu vĩnh viễn.
 2b. **Chọn project** (tuỳ chọn): thêm `@ten_project` vào tên file (ví dụ `[sau] @median_filter hold.md`) hoặc dòng `du_an: median_filter` trong nội dung. Không ghi gì thì script tự nhận theo tên block xuất hiện trong câu hỏi (so với các thư mục trong physical design); không khớp thì vào project `chung`.
 3. Lưu file là xong. **Khoảng 2–3 giây** sau khi file có trên máy ngoài, `Qnnn_traloi.md` xuất hiện với trạng thái "⏳ Đã nhận" và Claude bắt đầu làm. Tên câu hỏi được đổi thành `Qnnn_<tên của bạn>.md`.
-   - Đo thực tế: phát hiện file và xác nhận "Đã nhận" sau 2–3 giây. Mode nhanh cho câu trả lời đầy đủ sau khoảng 20–40 giây; mode chuan sau khoảng 2–5 phút.
+   - Đo thực tế: phát hiện file và xác nhận "Đã nhận" sau 2–3 giây. Mode `nhanh` (Sonnet) xong sau khoảng 30 giây đến 1 phút. Mode `chuan` (Opus, suy nghĩ kỹ) hiện bản nháp Kết luận sau khoảng 2 phút và xong sau 4–5 phút. Mode `sau` có thể 20–40 phút.
+   - Tối đa **2 câu chạy song song**, nên câu `nhanh` không phải chờ câu `sau` đang chạy.
    - Còn thêm thời gian OneDrive đồng bộ giữa hai máy (thường 5–30 giây). Phần này do OneDrive quyết định, script không điều khiển được.
 
 Claude tự tìm report, log, script và tài liệu (kể cả Innovus Text Command Reference) trong thư mục physical design, rồi kiểm chứng và bổ sung bằng web.
@@ -39,9 +40,20 @@ Claude tự tìm report, log, script và tài liệu (kể cả Innovus Text Com
 Mọi mode đều cho câu trả lời đầy đủ, không giới hạn độ dài. Mode chỉ quyết định mức độ research.
 Viết `mode: sâu`, `Mode = Nhanh`… cũng được nhận.
 
-Mỗi câu trả lời có các phần: **Tóm tắt**, **Trả lời chi tiết** (có số liệu từ report), **Lệnh / script đề xuất**, **Nguồn** (đường dẫn trên máy kèm trang hoặc dòng, và URL web), **Độ tin cậy & cần kiểm chứng**, **Bài học** (khái niệm chính, thuật ngữ, lệnh, câu tự kiểm tra có đáp án ẩn) và bảng **Kiểm chứng tự động**: script tra từng lệnh trong tài liệu tool trên máy. 📘 nghĩa là có trong tài liệu; 📄 nghĩa là chỉ thấy trong script dự án; ⚠️ nghĩa là chưa kiểm chứng, nên chạy `help <lệnh>` trước khi dùng.
+**Bố cục file trả lời `Qnnn_traloi.md`** — luôn đọc từ trên xuống, phần mới nhất ở đầu:
 
-**Hỏi tiếp:** mở `Qnnn_traloi.md`, viết một hoặc nhiều dòng bắt đầu bằng `>>` (ví dụ `>> Nếu skew 0.121 thì sao?`), rồi lưu. Vài giây sau, câu trả lời nối tiếp được chèn vào cùng file, ngay trước phần đánh giá. Claude tiếp tục đúng phiên trước nên không phải đọc lại từ đầu: nhanh và tốn ít token (đo thực tế: 2 lượt, 22 giây).
+1. `## ❓ Câu hỏi` / `## ❓ Hỏi tiếp`: câu hỏi của lượt mới nhất.
+2. `## ✅ Kết luận`: trả lời thẳng từng ý (1), (2)… kèm số liệu.
+3. `## 🛠 Áp dụng ngay`: các bước đánh số, lệnh Tcl chạy được, giá trị cụ thể, **cách kiểm tra kết quả và con số kỳ vọng**, dấu hiệu sai và cách quay lui.
+4. `## 🔍 Giải thích chi tiết`, `## ⚖️ Phương án & so sánh`, `## ⚠️ Lỗi thường gặp`, `## Nguồn`, `## Độ tin cậy`.
+5. `## Đã trả lời đủ chưa?`: Claude tự đối chiếu từng ý của câu hỏi.
+6. `## Bài học` và bảng `Kiểm chứng tự động`: 📘 có trong tài liệu tool, 📄 chỉ thấy trong script dự án, ⚠️ chưa kiểm chứng (nên chạy `help <lệnh>`).
+7. **📜 Các lượt trước (n)**: các lượt hỏi đáp cũ được **thu gọn**, bấm để mở.
+8. Phần đánh giá ở cuối file.
+
+Trong lúc Claude làm, đầu file hiện **⏳ tiến độ** (cập nhật mỗi 10 giây). Khi Claude đã viết xong phần Kết luận, file hiện thêm **📝 bản nháp** để bạn đọc trước.
+
+**Hỏi tiếp:** mở `Qnnn_traloi.md`, viết một hoặc nhiều dòng bắt đầu bằng `>>` (hoặc `»`, ký tự mà bàn phím tiếng Việt hay tự đổi từ `>>`) ở cuối file, rồi lưu. Ví dụ: `>> Nếu vẫn còn path âm thì sao?`. Muốn chọn mode cho riêng lượt này thì viết `>> [nhanh] …` hoặc `>> [sau] …`. Claude nhận được toàn bộ chuỗi hỏi đáp trước đó và tiếp tục đúng phiên cũ, nên giữ được mạch suy nghĩ: câu trả lời nói rõ điều gì giữ nguyên, điều gì thay đổi so với lượt trước. Lượt mới được đặt lên đầu file, lượt cũ tự thu gọn. Câu hỏi tiếp không bị mất kể cả khi bạn gõ thêm `>>` trong lúc Claude đang trả lời, hoặc khi máy bị tắt giữa chừng.
 
 **Sửa câu hỏi:** mở file câu hỏi **đã được đổi tên** (`Qnnn_...md`), sửa hoặc thêm yêu cầu, rồi lưu. Claude trả lời lại và tận dụng bản cũ: chỉ research phần mới và sửa chỗ bạn đánh giá sai. Bản cũ được giữ ở `Qnnn_traloi_cu.md`.
 

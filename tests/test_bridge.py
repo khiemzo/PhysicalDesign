@@ -101,7 +101,7 @@ class T(unittest.TestCase):
         self.assertIn("status=done", a)
         self.assertIn("## Tóm tắt", a)
         self.assertIn("danh_gia: chua", a)
-        self.assertIn("mode: **nhanh**", a)
+        self.assertIn("mode **nhanh**", a)
         self.assertNotIn("XONG", a)
         c = self.e.calls()
         self.assertEqual(len(c), 1)
@@ -138,7 +138,7 @@ class T(unittest.TestCase):
         self.e.run(self.b)
         self.assertTrue((self.e.q / "Q001_abc.md").exists())
         self.assertEqual(self.e.calls()[0]["model"], "opus")          # chuan -> opus
-        self.assertIn("mode: **chuan**", self.ans())
+        self.assertIn("mode **chuan**", self.ans())
 
     def test_04_edit_question_reanswer(self):
         self.e.ask("q.md", "mode: chuan\nHold sau CTS?")
@@ -156,7 +156,7 @@ class T(unittest.TestCase):
         self.assertIn("danh_gia: sai", (self.e.q / "Q001_traloi_cu.md").read_text())
         a2 = self.ans()
         self.assertIn("v=2", a2)
-        self.assertIn("mode: **sau**", a2)
+        self.assertIn("mode **sau**", a2)
         p2 = self.e.calls()[-1]["prompt"]
         self.assertIn("ĐÂY LÀ CÂU HỎI ĐÃ SỬA", p2)
         self.assertIn("thiếu phần OCV", p2)
@@ -184,7 +184,7 @@ class T(unittest.TestCase):
         self.e.run(self.b)
         c = self.e.calls()
         self.assertEqual([x["model"] for x in c], ["opus", "sonnet"])
-        self.assertIn("model: sonnet", self.ans())
+        self.assertIn("model sonnet", self.ans())
         self.assertIn("status=done", self.ans())
 
     def test_07_plan_limit_pause_and_resume(self):
@@ -375,9 +375,9 @@ class T(unittest.TestCase):
         self.e.run(self.b, 6)
         models = [c["model"] for c in self.e.calls()]
         self.assertEqual(models, ["sonnet", "sonnet", "opus"])
-        self.assertIn("mode: **sau**", self.ans("Q001"))
-        self.assertIn("mode: **nhanh**", self.ans("Q002"))
-        self.assertIn("mode: **chuan**", self.ans("Q003"))
+        self.assertIn("mode **sau**", self.ans("Q001"))
+        self.assertIn("mode **nhanh**", self.ans("Q002"))
+        self.assertIn("mode **chuan**", self.ans("Q003"))
         self.assertIn("SÂU", self.e.calls()[0]["prompt"])
         args = self.e.calls()[0]["args"]
         tools = args[args.index("--tools") + 1]
@@ -584,15 +584,34 @@ class T(unittest.TestCase):
         self.assertIn("Vậy với OCV thì sao?", c[1]["prompt"])
         self.assertTrue(c[1]["resume"], "tiếp tục phiên cũ (rẻ hơn)")
         t2 = a.read_text(encoding="utf-8")
-        self.assertIn("## 🔁 Hỏi tiếp", t2)
+        self.assertIn("## ❓ Hỏi tiếp", t2)
         self.assertIn("> Vậy với OCV thì sao?", t2)
         self.assertNotIn("\n>> ", t2)
         self.assertIn("danh_gia: dung", t2, "giữ đánh giá người hỏi")
-        self.assertLess(t2.index("## 🔁 Hỏi tiếp"), t2.index("**Đánh giá**"))
+        self.assertLess(t2.index("## ❓ Hỏi tiếp"), t2.index("📜 Các lượt trước (1)"), "lượt mới ở đầu")
+        self.assertLess(t2.index("<details>"), t2.index("### Lượt 1 · Câu hỏi gốc"), "lượt cũ được thu gọn")
+        self.assertLess(t2.index("📜 Các lượt trước"), t2.index("**Đánh giá**"))
+        self.assertIn("CHUỖI HỎI ĐÁP TRƯỚC", c[1]["prompt"])
+        self.assertIn("[Lượt 1] Hỏi: Hold sau CTS?", c[1]["prompt"])
         self.e.run(self.b)
         self.assertEqual(len(self.e.calls()), 2, "không trả lời lặp")
         kho = (self.e.kho / "du_an" / "chung" / "hoi_dap" / "Q001_traloi.md").read_text(encoding="utf-8")
-        self.assertIn("## 🔁 Hỏi tiếp", kho)
+        self.assertIn("## ❓ Hỏi tiếp", kho)
+        # hỏi tiếp lần 2 bằng ký hiệu » (bàn phím tiếng Việt hay tự đổi >> thành »)
+        a.write_text(a.read_text(encoding="utf-8") + "\n» Còn POCV?\n", encoding="utf-8")
+        self.b.tick(block=True)
+        time.sleep(DEB + 0.2)
+        self.e.run(self.b)
+        t3 = a.read_text(encoding="utf-8")
+        self.assertIn("> Còn POCV?", t3)
+        a.write_text(t3 + "\n>> [nhanh] Tóm tắt lại 3 ý?\n", encoding="utf-8")
+        self.b.tick(block=True)
+        time.sleep(DEB + 0.2)
+        self.e.run(self.b)
+        self.assertEqual(self.e.calls()[-1]["model"], "sonnet", ">> [nhanh] dùng mode nhanh")
+        self.assertIn("> Tóm tắt lại 3 ý?", a.read_text(encoding="utf-8"))
+        self.assertIn("📜 Các lượt trước (2)", t3)
+        self.assertLess(t3.index("> Còn POCV?"), t3.index("> Vậy với OCV thì sao?"))
 
     def test_35_lesson_notebook_and_verification(self):
         self.e.script("lesson")
@@ -638,6 +657,61 @@ class T(unittest.TestCase):
         self.e.run(self.b)
         p = self.e.calls()[0]["prompt"]
         self.assertIn("ccopt", p.split("GỢI Ý TỪ CHỈ MỤC")[1][:3000].lower())
+
+    def test_38_followup_pending_survives_restart_and_typing(self):
+        self.e.ask("q.md", "Hold sau CTS?")
+        self.e.run(self.b)
+        a = self.e.q / "Q001_traloi.md"
+        # giả lập: đã nhận hỏi tiếp rồi máy tắt (câu hỏi nằm trong state, dòng >> đã bị gỡ khỏi file)
+        self.b.state.sub("fu_pending")["Q001"] = "Câu hỏi tiếp trước khi tắt máy"
+        self.b.state.save()
+        b2 = self.e.new_bridge()
+        b2._weekly_tried = True
+        self.e.script("slow_ok", "ok")
+        b2.run_once(False)
+        t = a.read_text(encoding="utf-8")
+        self.assertIn("> Câu hỏi tiếp trước khi tắt máy", t)
+        self.assertNotIn("Q001", b2.state.sub("fu_pending"))
+        # dòng >> người hỏi gõ trong lúc đang trả lời không bị ghi đè
+        cur = {"qid": "Q001", "stem": "q", "v": 1, "mode": "chuan", "model": "opus",
+               "question": "đang hỏi", "pending_kind": "followup"}
+        a.write_text(a.read_text(encoding="utf-8") + "\n>> câu gõ thêm lúc đang chạy\n", encoding="utf-8")
+        b2.show_progress(cur, {"t0": time.time(), "steps": 2, "recent": ["Grep x"]}, None)
+        t = a.read_text(encoding="utf-8")
+        self.assertIn(">> câu gõ thêm lúc đang chạy", t)
+        self.assertIn("⏳ **Đang trả lời**", t)
+        self.assertLess(t.index("Đang trả lời"), t.index("📜 Các lượt trước"))
+
+    def test_39_draft_shown_while_writing(self):
+        tmp = self.e.tmp / "draft.md"
+        tmp.write_text("## ✅ Kết luận\n\nĐang viết dở phần kết luận…", encoding="utf-8")
+        self.e.ask("q.md", "câu hỏi")
+        self.b.tick(block=False) if False else None
+        cur = {"qid": "Q009", "stem": "x", "v": 1, "mode": "chuan", "model": "opus", "question": "x"}
+        self.b.show_progress(cur, {"t0": time.time() - 65, "steps": 3, "recent": ["Read one.tcl"]}, tmp)
+        t = (self.e.q / "Q009_traloi.md").read_text(encoding="utf-8")
+        self.assertIn("1 phút 05 giây", t)
+        self.assertIn("Bản nháp", t)
+        self.assertIn("Đang viết dở phần kết luận", t)
+        self.assertIn("status=running", t)
+
+    def test_40_two_questions_in_parallel(self):
+        self.e.script("slow_ok", "slow_ok")
+        self.e.ask("[sau] a.md", "câu sâu", age=10)
+        self.e.ask("[nhanh] b.md", "câu nhanh", age=9)
+        t0 = time.time()
+        for _ in range(60):
+            self.b.tick()
+            if not self.b.busy() and len(self.e.calls()) >= 2:
+                break
+            time.sleep(0.1)
+        for _ in range(100):
+            if not self.b.busy():
+                break
+            time.sleep(0.1)
+        self.assertIn("status=done", self.ans("Q001"))
+        self.assertIn("status=done", self.ans("Q002"))
+        self.assertLess(time.time() - t0, 3.2, "2 câu chạy song song (mỗi câu ~1.5s)")
 
 
 class TWatch(unittest.TestCase):

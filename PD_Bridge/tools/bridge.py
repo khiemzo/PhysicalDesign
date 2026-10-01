@@ -67,9 +67,9 @@ DEFAULTS = {
     "routine": {"url": "", "token": "", "headers": {}},
     "models": {"nhanh": "sonnet", "chuan": "opus", "sau": "opus", "tong_hop": "sonnet",
                "fallback": "sonnet"},
-    "effort": {"nhanh": "low", "chuan": "medium", "sau": "high", "tong_hop": "low"},
-    "max_turns": {"nhanh": 30, "chuan": 80, "sau": 200, "tong_hop": 40},
-    "timeout_min": {"nhanh": 20, "chuan": 45, "sau": 100, "tong_hop": 30},
+    "effort": {"nhanh": "medium", "chuan": "high", "sau": "xhigh", "tong_hop": "low"},
+    "max_turns": {"nhanh": 40, "chuan": 100, "sau": 250, "tong_hop": 40},
+    "timeout_min": {"nhanh": 20, "chuan": 50, "sau": 120, "tong_hop": 30},
     "default_mode": "chuan",
     "debounce_seconds": 2,       # file ngừng thay đổi 2 giây là nhận
     "poll_seconds": 1,           # quét thư mục câu hỏi mỗi giây (0 token)
@@ -89,7 +89,9 @@ DEFAULTS = {
     "stall_minutes": 5,
     "store_dir": None,               # kho project trên máy ngoài (mặc định %USERPROFILE%\\PD_Bridge_Kho)
     "auto_learn_days": 14,           # câu trả lời chưa bị đánh giá sai sau N ngày -> ◻️ chưa xác nhận
-    "followup_max_turns": 40,              # Claude im lặng quá lâu -> coi là treo, chạy lại
+    "followup_max_turns": 60,
+    "max_workers": 2,                # chạy song song tối đa 2 câu (câu nhanh không phải chờ câu sâu)
+    "draft_chars": 8000,             # hiện bản nháp câu trả lời trong lúc Claude đang viết              # Claude im lặng quá lâu -> coi là treo, chạy lại
 }
 MODEL_NAMES = {"opus", "sonnet", "haiku", "fable"}
 
@@ -233,7 +235,7 @@ def display_stem(fname: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", s)
 
 
-FU_LINE = re.compile(r"^\s*>>\s?(.*\S.*)$")
+FU_LINE = re.compile(r"^\s*(?:>>|»|＞＞)\s?(.*\S.*)$")
 
 
 def _outside_fences(text: str):
@@ -270,7 +272,7 @@ def escape_followups(body: str) -> str:
     """Dòng '>>' do Claude viết (ngoài code block) -> '\\>>' để không bị hiểu nhầm là câu hỏi tiếp."""
     lines = []
     for line, fence in _outside_fences(body):
-        lines.append(re.sub(r"^(\s*)>>", r"\1\\>>", line) if not fence else line)
+        lines.append(re.sub(r"^(\s*)(>>|»)", r"\1\\\2", line) if not fence else line)
     return "\n".join(lines)
 
 
@@ -285,7 +287,7 @@ def splice_followup(text: str, question: str, body: str, when: str) -> str:
 
 
 def summary_section(answer: str, limit: int = 1200) -> str:
-    m = re.search(r"^##\s*Tóm tắt\s*$(.*?)(?=^##\s|\Z)", answer, re.M | re.S | re.I)
+    m = re.search(r"^##\s*(?:✅\s*)?(?:Tóm tắt|Kết luận)[^\n]*$(.*?)(?=^##\s|\Z)", answer, re.M | re.S | re.I)
     s = (m.group(1) if m else answer).strip()
     s = MARK_RX.sub("", s)
     return s[:limit]
@@ -823,14 +825,16 @@ class Bridge:
             d.mkdir(parents=True, exist_ok=True)
         self.runner = ClaudeRunner(cfg, state)
         self.seen: dict[str, tuple] = {}          # tên file -> (size, mtime, last_change)
-        self.worker: threading.Thread | None = None
-        self.active: str | None = None
+        self.workers: dict[str, threading.Thread] = {}
+        self.active: set[str] = set()
+        self.io_lock = threading.RLock()
+        self.index_lock = threading.Lock()
         self.index_proc: subprocess.Popen | None = None
         self.last_house = 0.0
         self.code_mtime = self._code_mtime()
-        self.cur_job: dict | None = None
-        self.progress: dict = {}
+        self.progress: dict[str, dict] = {}
         self.last_status = 0.0
+        self.preflight_ok_until = 0.0
         self.last_error = ""
         self.auth_cache: tuple[float, dict] = (0.0, {})
         sd = cfg.get("store_dir") or str(Path(os.environ.get("USERPROFILE") or Path.home()) / "PD_Bridge_Kho")
@@ -1129,7 +1133,7 @@ class Bridge:
         for qid in sorted(rounds, key=qnum):
             r = rounds[qid]
             qf = r.get("q")
-            if not qf or qid == self.active:
+            if not qf or qid in self.active:
                 continue
             if self.chat_locked(qid):
                 continue
@@ -1146,7 +1150,8 @@ class Bridge:
             if st in ("done", "error") and mk.get("hash"):
                 if mk["hash"] != cur and (ignore_debounce or self.ready(qf)):
                     jobs.append((qid, "edit"))
-                elif st == "done" and parse_followups(read_text(a)) and (ignore_debounce or self.ready(a)):
+                elif st == "done" and (qid in self.state.sub("fu_pending") or (
+                        parse_followups(read_text(a)) and (ignore_debounce or self.ready(a)))):
                     jobs.append((qid, "followup"))
             else:
                 if ignore_debounce or self.ready(qf, 0 if st else None):
@@ -1222,11 +1227,7 @@ class Bridge:
 
     # ------------------------------------------------------------------ bộ nhớ: kho project (0 token)
     def remember_data(self, qid: str | None = None) -> None:
-        """Đánh chỉ mục kho (tăng dần) + ghi dòng thời gian cho dữ liệu vừa gửi."""
-        try:
-            self.store.reindex()
-        except BaseException as e:  # noqa: BLE001
-            log.warning("Chỉ mục kho lỗi: %s", e)
+        """Ghi dòng thời gian cho dữ liệu vừa gửi (chỉ mục kho làm nền sau khi trả lời)."""
         d = self.attachments_dir(qid) if qid else None
         if d:
             try:
@@ -1288,10 +1289,11 @@ class Bridge:
         return s + (f", … (+{len(names) - 45})" if len(names) > 45 else "")
 
     MODE_TEXT = {
-        "nhanh": ("NHANH — ưu tiên kien_thuc + chỉ mục trên máy (Innovus Text Command Reference…), "
-                  "đọc tối thiểu; web chỉ để kiểm chứng 1–2 điểm (cú pháp/tuỳ chọn). Xong trong vài phút."),
+        "nhanh": ("NHANH — ưu tiên kiến thức + chỉ mục trên máy (Innovus Text Command Reference…), web kiểm chứng "
+                  "1–2 điểm. Nhanh nhưng VẪN đủ: kết luận rõ, lệnh chạy được, cách kiểm tra kết quả."),
         "chuan": ("CHUẨN — tìm kỹ trên máy (script/report/log liên quan + tài liệu tool), đọc đúng phần cần; "
-                  "research web 2–4 nguồn uy tín; đối chiếu lý thuyết với dữ liệu thật trên máy."),
+                  "research web 2–4 nguồn uy tín; đối chiếu lý thuyết với dữ liệu thật; đưa phương án cụ thể có "
+                  "số liệu, các bước áp dụng, cách kiểm tra, rủi ro và phương án thay thế."),
         "sau": ("SÂU — nghiên cứu nhiều vòng: (1) thu thập đủ dữ liệu trên máy (report/log/script các run liên "
                 "quan, so sánh giữa các run), (2) tài liệu Cadence/Synopsys trên máy, (3) web ≥5 nguồn: app note, "
                 "paper, tài liệu hãng, diễn đàn, (4) lập giả thuyết → kiểm chứng bằng số liệu → so sánh các "
@@ -1303,6 +1305,7 @@ class Bridge:
         att = self.attachment_context(qid)
         search_text = question + " " + parse_prefix(stem)[2]
         hist = self.related_history(qid, search_text)
+        self.wait_reindex()
         gui_hits = self.search_gui(search_text, qid)
         proj = self.proj_of(qid)
         pbc = self.store.boi_canh(proj)
@@ -1360,8 +1363,10 @@ class Bridge:
             ">>>",
             "",
             f"Ghi TOÀN BỘ câu trả lời (Markdown, tiếng Việt; lệnh/thuật ngữ giữ tiếng Anh) vào file: {answer_tmp}",
-            "bằng công cụ Write (file dài thì Write phần đầu rồi Edit/append phần sau; KHÔNG cắt ngắn nội dung).",
-            "Bắt đầu bằng '## Tóm tắt'. Không in lại câu trả lời ra màn hình — cuối cùng chỉ in một dòng: XONG",
+            "Viết SỚM: ngay khi có kết luận, Write phần '## ✅ Kết luận' trước (người hỏi thấy bản nháp ngay), "
+            "rồi Edit nối tiếp từng mục theo CLAUDE.md. KHÔNG cắt ngắn nội dung.",
+            "Trước khi kết thúc: đọc lại câu hỏi, đối chiếu từng ý đã trả lời đủ chưa (mục '## Đã trả lời đủ chưa?'). "
+            "Không in lại câu trả lời ra màn hình — cuối cùng chỉ in một dòng: XONG",
         ]
         return "\n".join(parts)
 
@@ -1431,53 +1436,83 @@ class Bridge:
             self.write_placeholder(qid, stem, mode, v, "running", "⏳ Đang được trả lời trong chat…")
             info["prompt"] = prompt
             return info
-        self.cur_job = {"qid": qid, "stem": stem, "v": v}
-        self.progress = {}
-        self.write_placeholder(qid, stem, mode, v, "running",
-                               f"⏳ Đang xử lý (mode {mode}, model {model_short(model)}) — bắt đầu {ts_str(fmt='%H:%M')}.")
+        cur = {"qid": qid, "stem": stem, "v": v, "mode": mode, "model": model, "hash": qhash,
+               "question": question, "pending_kind": "edit" if edit else "main"}
+        self.show_progress(cur, {"t0": now(), "steps": 0, "recent": []}, answer_tmp)
         log.info("%s: bắt đầu (mode %s, model %s, v%d)", qid, mode, model, v)
         if self.cfg.get("runner") == "routine":
             res = self.run_routine(prompt, answer_tmp, mode)
         else:
             res = self.run_with_fallback(prompt, mode, model, run_dir, answer_tmp, job=mode,
-                                         extra_dirs=[self.attachments_dir(qid), self.store.du_an])
+                                         extra_dirs=[self.attachments_dir(qid), self.store.du_an], cur=cur)
         return self.handle_result(info, res, model)
 
     def process_followup(self, qid: str) -> dict | None:
-        """'>> câu hỏi tiếp' trong file trả lời -> trả lời nối tiếp (tiếp tục phiên cũ: ngữ cảnh đã có, rẻ)."""
+        """'>> câu hỏi tiếp' -> trả lời nối tiếp, giữ mạch: tiếp tục phiên cũ + kèm tóm tắt cả chuỗi hỏi đáp."""
         _, rounds = self.scan()
         r = rounds.get(qid, {})
         a, qf = r.get("a"), r.get("q")
         if not a or not qf:
             return None
-        text = read_text(a)
-        fu = parse_followups(text)
+        pend = self.state.sub("fu_pending")
+        typed = parse_followups(read_text(a))
+        fu = "\n".join(x for x in (pend.get(qid, ""), typed) if x).strip()
         if not fu:
+            pend.pop(qid, None)
+            self.state.save()
             return None
+        pend[qid] = fu                                     # lưu lại: máy tắt giữa chừng vẫn không mất câu hỏi
+        self.state.save()
         stem = Q_RX.match(qf.name).group(2)
         qraw = read_text(qf)
         mode, model = self.resolve_mode(stem, qraw)
+        fmode, fmodel, rest = parse_prefix(fu)             # '>> [nhanh] …' : chọn mode/model riêng cho lượt hỏi tiếp
+        if fmode or fmodel:
+            fu = rest
+            mode = fmode or mode
+            model = fmodel or self.cfg["models"].get(mode, model)
         proj = self.proj_of(qid)
+        mk = parse_marker(read_text(a))
+        v = int(mk.get("v", 1))
+        thread = self.load_thread(qid)
+        if not thread:                                     # file cũ (trước khi có luồng): lấy nội dung hiện có
+            old = strip_followups(read_text(a))
+            old = MARK_RX.sub("", RATING_RX.sub("", old))
+            thread = [{"kind": "main", "v": v, "q": parse_mode(qraw, "")[1], "body": old.strip(), "ts": "",
+                       "mode": mode, "model": "", "minutes": 0}]
+            self.save_thread(qid, thread)
         run_dir = self.runs / f"{qid}-fu-{ts_str(fmt='%Y%m%d-%H%M%S')}"
         run_dir.mkdir(parents=True, exist_ok=True)
         answer_tmp = run_dir / "answer.md"
-        arch = self.store.answer_path(proj, qid) or a
+        cur = {"qid": qid, "stem": stem, "v": v, "mode": mode, "model": model, "question": fu,
+               "pending_kind": "followup"}
+        self.show_progress(cur, {"t0": now(), "steps": 0, "recent": []}, None)
+        convo = []
+        for i, t in enumerate(thread, 1):
+            kind = {"main": "Hỏi", "edit": "Hỏi (đã sửa)", "followup": "Hỏi tiếp"}.get(t.get("kind"), "Hỏi")
+            convo.append(f"[Lượt {i}] {kind}: {norm_text(t.get('q', ''))[:700]}\n"
+                         f"  Kết luận đã trả lời: {summary_section(t.get('body', ''), 900)}")
         sid = self.state.sub("sessions").get(qid)
         prompt = "\n".join([
-            f"HỎI TIẾP cho {qid} ({stem}), project {proj}. Làm theo CLAUDE.md (mục Hỏi tiếp).",
-            f"Câu trả lời trước (toàn bộ, kể cả các lần hỏi tiếp): {arch}",
-            "Câu hỏi gốc:", "<<<", parse_mode(qraw, "")[1][:1500], ">>>", "",
-            "HỎI TIẾP:", "<<<", fu, ">>>", "",
-            "Trả lời đúng trọng tâm phần hỏi tiếp, không lặp lại phần đã trả lời (dẫn chiếu nếu cần); vẫn tìm "
-            "trên máy/web khi cần số liệu mới. Có '## Bài học' nếu có khái niệm/lệnh mới.",
-            f"Ghi câu trả lời (Markdown) vào file: {answer_tmp}",
+            f"HỎI TIẾP cho {qid} ({stem}), project {proj}. Làm theo CLAUDE.md (mục Hỏi tiếp + Tiêu chuẩn chất lượng).",
+            f"MODE: {self.MODE_TEXT[mode]}",
+            "",
+            "CHUỖI HỎI ĐÁP TRƯỚC (giữ mạch suy nghĩ; bản đầy đủ: "
+            f"{self.store.pdir(proj) / 'hoi_dap' / (qid + '_traloi.md')}):",
+            *convo,
+            "",
+            "CÂU HỎI TIẾP MỚI:", "<<<", fu, ">>>", "",
+            "Yêu cầu: nối tiếp mạch lập luận các lượt trước (nêu rõ điểm nào giữ nguyên, điểm nào thay đổi/bổ sung "
+            "và vì sao); trả lời đầy đủ, sâu, áp dụng được ngay như một câu hỏi mới — không trả lời qua loa; tìm "
+            "thêm trên máy/web khi cần số liệu mới; tự kiểm chứng lệnh; có '## Bài học' nếu có khái niệm/lệnh mới.",
+            f"Ghi câu trả lời (Markdown, bắt đầu bằng '## ✅ Kết luận') vào file: {answer_tmp}",
             "Cuối cùng chỉ in: XONG",
         ])
-        self.cur_job = None
         log.info("%s: hỏi tiếp (%s) — %s", qid, "tiếp tục phiên cũ" if sid else "phiên mới", fu[:80])
+        t0 = now()
         res = self.run_with_fallback(prompt, mode, model, run_dir, answer_tmp, job=mode,
                                      extra_dirs=[self.attachments_dir(qid), self.store.du_an],
-                                     resume=sid, max_turns=int(self.cfg.get("followup_max_turns", 40)))
+                                     resume=sid, max_turns=int(self.cfg.get("followup_max_turns", 60)), cur=cur)
         fails = self.state.sub("fu_fail")
         if not self.answer_ok(answer_tmp):
             if res.kind == "limit":
@@ -1488,40 +1523,47 @@ class Bridge:
             self.state.save()
             log.error("%s: hỏi tiếp lỗi (%s, lần %d): %s", qid, res.kind, fails[qid], res.text[:200])
             self.last_error = f"{qid} hỏi tiếp: {res.kind}"
-            if fails[qid] >= int(self.cfg.get("max_attempts", 3)):
-                cur = read_text(a)
-                atomic_write(a, strip_followups(cur, mark="**🔁 Hỏi tiếp (lỗi — thêm lại dòng `>>` để thử lại):** "))
+            limit_n = int(self.cfg.get("max_attempts_transient" if res.kind in ("timeout", "transient")
+                                       else "max_attempts", 3))
+            if fails[qid] >= limit_n:
+                body = (f"## ✅ Kết luận\n\n❌ Chưa trả lời được câu hỏi tiếp sau {fails[qid]} lần thử ({res.kind}): "
+                        f"`{res.text[:300]}`\n\nViết lại dòng `>>` để thử lại.")
+                self._append_round(qid, stem, thread, "followup", fu, body, model, model, t0, mk, mode=mode)
+                pend.pop(qid, None)
                 fails.pop(qid, None)
                 self.state.save()
             else:
-                self.state.sub("retry")[qid] = {"n": fails[qid], "next": now() + 60 * fails[qid]}
+                self.state.sub("retry")[qid] = {"n": fails[qid], "next": now() + 30 * fails[qid]}
                 self.state.save()
             return {"qid": qid, "status": "error"}
-        body = MARK_RX.sub("", read_text(answer_tmp)).strip()
-        body = re.sub(r"\n?XONG\s*$", "", body).rstrip()
-        body = escape_followups(RATING_RX.sub("", body))
-        verified: dict = {}
-        try:
-            ver, verified = pd_store.verify_commands(body, self.db_path())
-            body += ver
-        except Exception:  # noqa: BLE001
-            pass
-        cur = read_text(a)                                    # đọc lại: giữ đánh giá người hỏi vừa sửa
-        new = splice_followup(strip_followups(cur), fu, body, ts_str())
-        atomic_write(a, new)
+        body, verified = self.clean_body(read_text(answer_tmp), True)
+        text = self._append_round(qid, stem, thread, "followup", fu, body, res.model or model, model, t0, mk,
+                                  mode=mode)
         if res.session_id:
             self.state.sub("sessions")[qid] = res.session_id
+        pend.pop(qid, None)
         fails.pop(qid, None)
         self.state.sub("retry").pop(qid, None)
         self.state.save()
-        mk = parse_marker(new)
-        self.after_answer(qid, proj, stem, new, int(mk.get("v", 1)), body, verified)
-        self.journal({"type": "followup", "q": qid, "v": int(mk.get("v", 1)), "proj": proj,
+        self.after_answer(qid, proj, stem, text, v, body, verified)
+        self.journal({"type": "followup", "q": qid, "v": v, "proj": proj,
                       "ts": ts_str(fmt="%Y-%m-%d %H:%M:%S"), "t": now(), "question": fu[:800],
                       "summary": summary_section(body, 600)})
         self.render_learning(proj)
-        log.info("%s: XONG hỏi tiếp", qid)
+        self.reindex_later()
+        log.info("%s: XONG hỏi tiếp (%.0fs)", qid, now() - t0)
         return {"qid": qid, "status": "done"}
+
+    def _append_round(self, qid, stem, thread, kind, q, body, used_model, model, t0, mk, mode=None) -> str:
+        with self.io_lock:
+            thread = self.load_thread(qid) or thread
+            thread.append({"kind": kind, "v": int(mk.get("v", 1)), "q": q, "body": body, "ts": ts_str(),
+                           "mode": mode or mk.get("mode", ""), "model": model_short(used_model or model),
+                           "minutes": max(1, round((now() - t0) / 60))})
+            self.save_thread(qid, thread)
+            return self.render_answer(qid, stem, thread,
+                                      {"v": int(mk.get("v", 1)), "hash": mk.get("hash", ""), "status": "done",
+                                       "mode": mk.get("mode", ""), "model": mk.get("model", "")})
 
     def preflight(self) -> str | None:
         """Kiểm tra đăng nhập (0 token). -> None nếu ổn, ngược lại lý do."""
@@ -1529,6 +1571,8 @@ class Bridge:
             return None
         if not self.runner.exe:
             return "chua cai claude"
+        if now() < self.preflight_ok_until:
+            return None
         st = self.runner.auth_status()
         if not st:
             return None
@@ -1537,29 +1581,24 @@ class Bridge:
         meth = str(st.get("authMethod", "")).lower()
         if not self.cfg.get("allow_api_key") and ("api" in meth and "key" in meth or meth == "console"):
             return "dang dung API key (se ton tien API) — dang nhap lai bang tai khoan Claude: claude auth login"
+        self.preflight_ok_until = now() + 600
         return None
 
     def run_with_fallback(self, prompt: str, mode: str, model: str, run_dir: Path, answer_tmp: Path,
                           job: str, extra_dirs: list | None = None, resume: str | None = None,
-                          max_turns: int | None = None) -> RunResult:
+                          max_turns: int | None = None, cur: dict | None = None) -> RunResult:
         cwd = self.root
         add_dirs = [d for d in (self.data_dir, run_dir, self.tools, *(extra_dirs or []))
                     if d and Path(d).exists()]
         deny = [self.data_dir] if self.data_dir else []
         allowed = self.allowed_tools(web=True)
-        cur = self.cur_job or {}
+        cur = cur or {}
 
         def progress(pg):
-            self.progress = pg
             if not cur:
                 return
-            el = int(now() - pg["t0"])
-            steps = "\n".join(f"- `{x}`" for x in pg.get("recent") or []) or "- _đang đọc câu hỏi và suy nghĩ…_"
-            self.write_placeholder(cur["qid"], cur["stem"], mode, cur["v"], "running",
-                                   f"⏳ Đang xử lý (mode {mode}, model {model_short(model)}) — {el // 60} phút {el % 60:02d} giây, "
-                                   f"{pg['steps']} bước nghiên cứu.\n\nCác bước gần nhất:\n{steps}\n\n"
-                                   f"_Tự cập nhật mỗi {int(float(self.cfg.get('progress_seconds', 10)))} giây. "
-                                   f"Nếu Claude im lặng quá {self.cfg.get('stall_minutes', 5)} phút, hệ thống tự chạy lại._")
+            self.progress[cur["qid"]] = pg
+            self.show_progress(cur, pg, answer_tmp)
 
         res = self.runner.run(prompt, model, job, cwd, add_dirs, deny, allowed, run_dir, on_progress=progress,
                               resume=resume, max_turns=max_turns)
@@ -1573,28 +1612,28 @@ class Bridge:
             res = self.runner.run(prompt, fb, job, cwd, add_dirs, deny, allowed, run_dir, tag="_fb",
                                   on_progress=progress)
             res.model = res.model or fb
-        self.rescue_answer(answer_tmp, run_dir)
+        self.rescue_answer(answer_tmp, run_dir, cur)
         if res.kind in ("max_turns", "ok", "timeout") and not self.answer_ok(answer_tmp) and res.session_id \
                 and not (res.ok and len(res.text.strip()) >= 400):
             log.info("   chưa có file trả lời (%s) -> yêu cầu viết câu trả lời với thông tin đã có", res.kind)
             fin = ("Bạn đã dừng mà chưa ghi file trả lời. Hãy viết NGAY câu trả lời hoàn chỉnh nhất có thể "
-                   "với thông tin đã thu thập (bắt đầu bằng '## Tóm tắt', ghi rõ phần nào chưa kịp kiểm chứng) "
+                   "với thông tin đã thu thập (bắt đầu bằng '## ✅ Kết luận', ghi rõ phần nào chưa kịp kiểm chứng) "
                    f"vào file: {answer_tmp}\nCuối cùng in: XONG")
             res2 = self.runner.run(fin, res.model or model, job, cwd, add_dirs, deny, ["Write", "Edit", "Read"],
                                    run_dir, tag="_fin", resume=res.session_id, max_turns=8)
-            self.rescue_answer(answer_tmp, run_dir)
+            self.rescue_answer(answer_tmp, run_dir, cur)
             if self.answer_ok(answer_tmp):
                 res2.ok, res2.kind = True, "ok" if res.kind != "max_turns" else "max_turns"
                 res2.model = res2.model or res.model
                 return res2
         return res
 
-    def rescue_answer(self, answer_tmp: Path, run_dir: Path) -> None:
+    def rescue_answer(self, answer_tmp: Path, run_dir: Path, cur: dict | None = None) -> None:
         """Claude ghi nhầm chỗ (file .md khác trong run_dir, hoặc thẳng vào Qnnn_traloi.md) -> lấy lại."""
         if self.answer_ok(answer_tmp):
             return
         cands = [f for f in run_dir.glob("*.md") if f.name != answer_tmp.name]
-        cur = self.cur_job or {}
+        cur = cur or {}
         if cur:
             a = self.qdir / f"{cur['qid']}_traloi.md"
             if a.exists() and "pd_bridge" not in read_text(a)[-400:]:
@@ -1637,6 +1676,7 @@ class Bridge:
                                    f"⏸ Hết hạn mức gói Claude — sẽ tự làm lại lúc {ts_str(until, '%H:%M %d/%m')}.")
             return {"qid": qid, "status": "limit"}
         if res.kind == "login":
+            self.preflight_ok_until = 0
             self.state.set("paused_until", now() + 10 * 60)
             self.state.set("pause_reason", "login")
             log.error("Loi: chua dang nhap Claude Code (%s) — mở PowerShell, gõ `claude` rồi đăng nhập",
@@ -1671,44 +1711,173 @@ class Bridge:
     def finalize(self, info: dict, body: str, model: str, note: str = "", status: str = "done") -> None:
         qid, stem, mode, v = info["qid"], info["stem"], info["mode"], info["v"]
         mins = max(1, round((now() - info.get("started", now())) / 60))
+        body, verified = self.clean_body(body, status == "done")
+        proj = self.proj_of(qid)
+        kind = "main" if v == 1 else "edit"
+        with self.io_lock:
+            rounds = self.load_thread(qid)
+            rounds.append({"kind": kind, "v": v, "q": info["question"][:8000], "body": body, "ts": ts_str(),
+                           "mode": mode, "model": model_short(model), "minutes": mins, "note": note,
+                           "status": status})
+            self.save_thread(qid, rounds)
+            text = self.render_answer(qid, stem, rounds, {"v": v, "hash": info["hash"], "status": status,
+                                                         "mode": mode, "model": model_short(model)},
+                                      rating=("chua", ""))
+            self.state.sub("last_q")[qid] = {"text": info["question"][:6000], "hash": info["hash"], "v": v}
+            if info.get("sid"):
+                self.state.sub("sessions")[qid] = info["sid"]
+            self.state.save()
+            self.after_answer(qid, proj, stem, text, v, body, verified)
+            rec = {"type": "answer", "q": qid, "v": v, "ts": ts_str(fmt="%Y-%m-%d %H:%M:%S"), "t": now(),
+                   "name": stem, "mode": mode, "model": model_short(model), "status": status, "minutes": mins,
+                   "proj": proj, "question": info["question"][:1500], "summary": summary_section(body)}
+            self.journal(rec)
+            with open(self.tong_hop / "nhat_ky.md", "a", encoding="utf-8") as f:
+                f.write(f"- {ts_str()} **{qid}** v{v} [{mode}/{model_short(model)}, {mins}′] {stem}"
+                        f"{' — ❌ lỗi' if status == 'error' else ''}\n")
+        log.info("%s: %s -> %s_traloi.md (%d phút, project %s)", qid, "XONG" if status == "done" else "LỖI",
+                 qid, mins, proj)
+        self.render_learning(proj)
+        self.reindex_later()
+
+    # ------------------------------------------------------------------ luồng hỏi đáp trong 1 file
+    def clean_body(self, body: str, verify: bool) -> tuple[str, dict]:
         body = MARK_RX.sub("", body).strip()
+        body = re.sub(r"\A#\s[^\n]*\n+", "", body)          # bỏ tiêu đề H1 Claude tự thêm (file đã có)
         body = re.sub(r"\n?XONG\s*$", "", body).rstrip()
-        # bỏ dòng đánh giá nếu Claude tự thêm (tránh trùng)
         body = escape_followups(RATING_RX.sub("", body))
         body = re.sub(r"\n## Kiểm chứng tự động \(script.*?(?=\n## |\Z)", "", body, flags=re.S).rstrip()
         verified: dict = {}
-        if status == "done":
+        if verify:
             try:
                 ver, verified = pd_store.verify_commands(body, self.db_path())
                 body += ver
             except Exception as e:  # noqa: BLE001
                 log.warning("Kiểm chứng lệnh lỗi: %s", e)
-        header = (f"# {qid} — {stem}\n\n"
-                  f"> mode: **{mode}** · model: {model_short(model)} · {ts_str()} · {mins} phút"
-                  f"{' · lần ' + str(v) if v > 1 else ''}{note}\n\n")
-        footer = (f"\n\n---\n\n**Đánh giá** — sửa `chua` thành `dung`, `mot_phan` hoặc `sai`"
-                  f" (tuỳ chọn thêm ghi chú sau `ghi_chu:`):\n\n"
-                  f"danh_gia: chua\n\nghi_chu:\n\n"
-                  f"<!-- pd_bridge q={qid} v={v} hash={info['hash']} status={status} mode={mode} "
-                  f"model={model_short(model)} -->\n")
-        atomic_write(self.qdir / f"{qid}_traloi.md", header + body + footer)
-        self.state.sub("last_q")[qid] = {"text": info["question"][:6000], "hash": info["hash"], "v": v}
-        if info.get("sid"):
-            self.state.sub("sessions")[qid] = info["sid"]
-        self.state.save()
+        return body, verified
+
+    def thread_file(self, qid: str) -> Path:
+        return self.store.pdir(self.proj_of(qid)) / "hoi_dap" / f"{qid}.thread.json"
+
+    def load_thread(self, qid: str) -> list[dict]:
+        try:
+            return json.loads(self.thread_file(qid).read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return []
+
+    def save_thread(self, qid: str, rounds: list[dict]) -> None:
+        f = self.thread_file(qid)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rounds, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, f)
+
+    @staticmethod
+    def quote(t: str, limit: int = 3000) -> str:
+        t = norm_text(t)[:limit]
+        return "\n".join("> " + l if l.strip() else ">" for l in t.split("\n"))
+
+    def render_answer(self, qid: str, stem: str, rounds: list[dict], mark: dict,
+                      rating: tuple[str, str] | None = None, pending: dict | None = None) -> str:
+        """File trả lời: lượt MỚI NHẤT ở đầu (đầy đủ), các lượt cũ thu gọn trong <details>, đánh giá ở cuối.
+        Giữ đánh giá + dòng '>>' người hỏi đang gõ dở trong file hiện tại."""
+        a = self.qdir / f"{qid}_traloi.md"
+        cur_text = ""
+        try:
+            cur_text = read_text(a) if a.exists() else ""
+        except OSError:
+            pass
+        if rating is None:
+            rating = parse_rating(cur_text) if cur_text else ("chua", "")
+        typed = parse_followups(cur_text) if cur_text else ""
+        if pending and typed:
+            typed = "\n".join(l for l in typed.split("\n") if l.strip() and l.strip() not in pending.get("q", ""))
         proj = self.proj_of(qid)
-        self.after_answer(qid, proj, stem, header + body + footer, v, body, verified)
-        rec = {"type": "answer", "q": qid, "v": v, "ts": ts_str(fmt="%Y-%m-%d %H:%M:%S"), "t": now(),
-               "name": stem, "mode": mode, "model": model_short(model), "status": status, "minutes": mins,
-               "proj": proj,
-               "question": info["question"][:1500], "summary": summary_section(body)}
-        self.journal(rec)
-        with open(self.tong_hop / "nhat_ky.md", "a", encoding="utf-8") as f:
-            f.write(f"- {ts_str()} **{qid}** v{v} [{mode}/{model_short(model)}, {mins}′] {stem}"
-                    f"{' — ❌ lỗi' if status == 'error' else ''}\n")
-        log.info("%s: %s -> %s_traloi.md (%d phút, project %s)", qid, "XONG" if status == "done" else "LỖI",
-                 qid, mins, proj)
-        self.render_learning(proj)
+        main_v = mark.get("v", 1)
+        out = [f"# {qid} — {stem}", ""]
+        older = list(rounds)
+        if pending:
+            out += [f"> ⏳ **Đang trả lời** · {pending.get('label', '')} · project {proj}", "",
+                    "## ❓ Câu hỏi", "", self.quote(pending.get("q", "")), "", pending.get("body", "")]
+        elif older:
+            last = older.pop()
+            kind = {"main": "Câu hỏi", "edit": f"Câu hỏi (đã sửa, lần {last.get('v')})",
+                    "followup": "Hỏi tiếp"}.get(last.get("kind"), "Câu hỏi")
+            out += [f"> 🆕 {last.get('ts', '')} · mode **{last.get('mode', '')}** · model {last.get('model', '')} · "
+                    f"{last.get('minutes', 1)} phút · project {proj}{last.get('note', '')}"
+                    + (f" · {len(rounds)} lượt" if len(rounds) > 1 else ""), "",
+                    f"## ❓ {kind}", "", self.quote(last.get("q", "")), "", last.get("body", "")]
+        if older:
+            out += ["", "---", "", "<details>", f"<summary>📜 Các lượt trước ({len(older)}) — bấm để mở</summary>", ""]
+            for i, r in enumerate(reversed(older)):
+                n = len(older) - i
+                kind = {"main": "Câu hỏi gốc", "edit": f"Câu hỏi đã sửa (lần {r.get('v')})",
+                        "followup": "Hỏi tiếp"}.get(r.get("kind"), "Câu hỏi")
+                body = re.sub(r"(?m)^(#{1,3}) ", lambda m: "#" * min(6, len(m.group(1)) + 2) + " ", r.get("body", ""))
+                out += [f"### Lượt {n} · {kind} · {r.get('ts', '')}", "", self.quote(r.get("q", ""), 1500), "",
+                        body, ""]
+            out += ["</details>"]
+        out += ["", "---", "",
+                "**Hỏi tiếp:** viết một dòng bắt đầu bằng `>>` (ví dụ `>> còn trường hợp OCV thì sao?`) rồi lưu file.",
+                ""]
+        if typed:
+            out += ["\n".join(">> " + l for l in typed.split("\n") if l.strip()), ""]
+        out += ["**Đánh giá** — sửa `chua` thành `dung`, `mot_phan` hoặc `sai` (tuỳ chọn thêm ghi chú sau `ghi_chu:`):",
+                "", f"danh_gia: {rating[0]}", "", f"ghi_chu: {rating[1]}".rstrip(), "",
+                f"<!-- pd_bridge q={qid} v={main_v} hash={mark.get('hash', '')} status={mark.get('status', 'done')} "
+                f"mode={mark.get('mode', '')} model={mark.get('model', '')} -->", ""]
+        text = "\n".join(out)
+        atomic_write(a, text)
+        return text
+
+    def show_progress(self, cur: dict, pg: dict, answer_tmp: Path | None) -> None:
+        """Tiến độ + bản nháp đang viết, ghi vào file trả lời (lượt mới ở đầu)."""
+        qid = cur["qid"]
+        el = int(now() - pg.get("t0", now()))
+        steps = "\n".join(f"- `{x}`" for x in pg.get("recent") or []) or "- _đang đọc câu hỏi, dữ liệu và suy nghĩ…_"
+        draft = ""
+        try:
+            if answer_tmp and answer_tmp.exists():
+                d = read_text(answer_tmp).strip()
+                lim = int(self.cfg.get("draft_chars", 8000))
+                if d:
+                    draft = ("\n\n---\n\n**📝 Bản nháp (Claude đang viết tiếp, sẽ được thay bằng bản hoàn chỉnh):**\n\n"
+                             + escape_followups(d[:lim]) + ("\n\n…" if len(d) > lim else ""))
+        except OSError:
+            pass
+        msg = (f"⏳ **Đang xử lý** — {el // 60} phút {el % 60:02d} giây · {pg.get('steps', 0)} bước nghiên cứu · "
+               f"mode {cur['mode']} · model {model_short(cur['model'])}\n\nCác bước gần nhất:\n{steps}\n\n"
+               f"_Tự cập nhật mỗi {int(float(self.cfg.get('progress_seconds', 10)))} giây; Claude im lặng quá "
+               f"{self.cfg.get('stall_minutes', 5)} phút thì tự chạy lại._{draft}")
+        with self.io_lock:
+            rounds = self.load_thread(qid)
+            if rounds:
+                label = {"followup": "hỏi tiếp", "edit": "câu hỏi đã sửa"}.get(cur.get("pending_kind"), "")
+                mk = parse_marker(read_text(self.qdir / f"{qid}_traloi.md")) if \
+                    (self.qdir / f"{qid}_traloi.md").exists() else {}
+                status = "done" if cur.get("pending_kind") == "followup" else "running"
+                self.render_answer(qid, cur["stem"], rounds,
+                                   {"v": cur["v"], "hash": mk.get("hash", "") if status == "done" else "",
+                                    "status": status, "mode": cur["mode"], "model": model_short(cur["model"])},
+                                   rating=None if status == "done" else ("chua", ""),
+                                   pending={"q": cur.get("question", ""), "body": msg, "label": label})
+            else:
+                self.write_placeholder(qid, cur["stem"], cur["mode"], cur["v"], "running", msg)
+
+    def reindex_later(self) -> None:
+        """Chỉ mục kho chạy nền sau khi đã gửi câu trả lời (không làm chậm việc trả lời)."""
+        def run():
+            try:
+                with self.index_lock:
+                    self.store.reindex()
+            except BaseException as e:  # noqa: BLE001
+                log.warning("Chỉ mục kho lỗi: %s", e)
+        self.reindex_thread = threading.Thread(target=run, daemon=True)
+        self.reindex_thread.start()
+
+    def wait_reindex(self) -> None:
+        t = getattr(self, "reindex_thread", None)
+        if t is not None and t.is_alive():
+            t.join(timeout=20)
 
     def after_answer(self, qid: str, proj: str, stem: str, full_text: str, v: int, body: str,
                      verified: dict) -> None:
@@ -1736,6 +1905,10 @@ class Bridge:
         return out
 
     def render_learning(self, proj: str | None = None) -> None:
+        with self.io_lock:
+            self._render_learning(proj)
+
+    def _render_learning(self, proj: str | None = None) -> None:
         try:
             recs = self.read_journal()
             for p in ([proj] if proj else self.store.projects()):
@@ -1745,7 +1918,7 @@ class Bridge:
             log.warning("Cập nhật mục lục/sổ tay lỗi: %s", e)
 
     def journal(self, rec: dict) -> None:
-        with open(self.tong_hop / "nhat_ky.jsonl", "a", encoding="utf-8") as f:
+        with self.io_lock, open(self.tong_hop / "nhat_ky.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def record_rating(self, qid: str, v: int, rating: str, note: str, file: str) -> None:
@@ -1835,7 +2008,7 @@ class Bridge:
             return
         for qid in order[: len(order) - keep]:
             r = rounds[qid]
-            if qid == self.active or self.chat_locked(qid):
+            if qid in self.active or self.chat_locked(qid):
                 continue
             a = r.get("a")
             mk = parse_marker(read_text(a)) if a else {}
@@ -2093,8 +2266,9 @@ class Bridge:
             if qid:
                 self.internal_failure(qid, e)
         finally:
-            self.active = None
-            self.cur_job = None
+            name = args[0] if args and isinstance(args[0], str) else getattr(fn, "__name__", "")
+            self.active.discard(name)
+            self.progress.pop(name, None)
 
     def internal_failure(self, qid: str, e: Exception) -> None:
         """Lỗi trong code (không phải Claude): thử lại vài lần, sau đó ghi lỗi rõ ràng thay vì treo."""
@@ -2131,12 +2305,18 @@ class Bridge:
             log.exception("internal_failure")
 
     def start_worker(self, name: str, fn, *args) -> None:
-        self.active = name
-        self.worker = threading.Thread(target=self._work, args=(fn, *args), daemon=True)
-        self.worker.start()
+        self.active.add(name)
+        t = threading.Thread(target=self._work, args=(fn, *args), daemon=True)
+        self.workers[name] = t
+        t.start()
 
     def busy(self) -> bool:
-        return self.worker is not None and self.worker.is_alive()
+        self.workers = {k: t for k, t in self.workers.items() if t.is_alive()}
+        return bool(self.workers)
+
+    def free_slots(self) -> int:
+        self.busy()
+        return max(0, int(self.cfg.get("max_workers", 2)) - len(self.workers))
 
     def tick(self, ignore_debounce: bool = False, block: bool = False) -> None:
         new, rounds = self.scan()
@@ -2148,9 +2328,11 @@ class Bridge:
         self.retention(rounds)
         self.housekeeping()
         self.index_check()
-        if self.busy():
-            return
         if self.paused():
+            return
+        if not block and self.free_slots() == 0:
+            return
+        if "weekly" in self.active:
             return
         jobs = self.pending_jobs(rounds, ignore_debounce)
         if jobs:
@@ -2173,18 +2355,22 @@ class Bridge:
                                            f"⚠️ Chưa chạy được: {fix}\n\nWatcher tự thử lại mỗi 10 phút.")
                 self.write_status(force=True)
                 return
-            qid, kind = jobs[0]
             if block:
-                self.active = qid
+                qid, kind = jobs[0]
+                self.active.add(qid)
                 self._work(self.process, qid, kind)
-            else:
+                return
+            for qid, kind in jobs[: self.free_slots()]:
                 self.start_worker(qid, self.process, qid, kind)
+            return
+        if self.busy():
             return
         if self.weekly_due():
             if block:
                 if getattr(self, "_weekly_tried", False):
                     return
                 self._weekly_tried = True
+                self.active.add("weekly")
                 self._work(self.weekly)
             else:
                 self.start_worker("weekly", self.weekly)
@@ -2199,7 +2385,7 @@ class Bridge:
             auth = self.runner.auth_status()
             self.auth_cache = (now(), auth)
         pu = float(self.state.get("paused_until", 0))
-        pg = self.progress if self.busy() and self.progress else {}
+        pgs = dict(self.progress)
         try:
             tail = (self.home / "watcher.log").read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
         except OSError:
@@ -2210,9 +2396,9 @@ class Bridge:
             auth_s = "**CHƯA ĐĂNG NHẬP** — trên máy ngoài chạy: `claude auth login`"
         else:
             auth_s = "không kiểm tra được"
-        doing = self.active or "-"
-        if pg:
-            doing += f" — {int((now() - pg['t0']) // 60)} phút, {pg['steps']} bước, gần nhất: `{pg['last']}`"
+        doing = ", ".join(sorted(self.active)) or "-"
+        for q, pg in pgs.items():
+            doing += f"; {q}: {int((now() - pg['t0']) // 60)} phút, {pg['steps']} bước, gần nhất: `{pg.get('last', '')}`"
         lines = [
             "# Trạng thái PD_Bridge (máy ngoài)", "",
             f"- Cập nhật lúc: **{ts_str(fmt='%Y-%m-%d %H:%M:%S')}** (ghi mỗi phút; giờ cũ = watcher đã dừng)",

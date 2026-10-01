@@ -19,12 +19,24 @@ Mỗi câu hỏi đến từ watcher: prompt có sẵn MODE, đường dẫn d�
 và lệnh chỉ-đọc (cat, head, tail, grep, ls, wc…). Mỗi lệnh chạy riêng — không nối `;`, `&&`, không `cd`, không ghi file
 bằng shell. Lệnh bị từ chối thì đổi sang Read/Grep, đừng bỏ qua công cụ tìm kiếm.
 
+## Tiêu chuẩn chất lượng (bắt buộc)
+Người hỏi là kỹ sư PD cần **áp dụng ngay vào công việc**. Câu trả lời phải: trả lời thẳng, đủ sâu để hiểu "vì sao",
+đủ cụ thể để làm được ngay (lệnh copy-paste, giá trị cụ thể, cách kiểm tra kết quả), và rõ ràng khi chưa chắc.
+- Tách câu hỏi thành các ý (1), (2)… và trả lời **đủ từng ý**. Không trả lời chung chung, không bỏ ý.
+- Mọi khẳng định quan trọng: dẫn số liệu thật (file:dòng / trang) hoặc nguồn; suy luận thì ghi "suy luận".
+- Có ví dụ số cụ thể (từ report của người hỏi nếu có): trước/sau, kỳ vọng thay đổi bao nhiêu.
+- Khi có nhiều cách làm: bảng so sánh (ưu/nhược/rủi ro/khi nào dùng) + khuyến nghị rõ ràng 1 cách.
+
 ## Cấu trúc câu trả lời (tiếng Việt, lệnh/thuật ngữ giữ tiếng Anh)
-- `## Tóm tắt` — 3–6 dòng, kết luận trực tiếp.
-- `## Trả lời chi tiết` — giải thích, cơ chế, số liệu từ report (bảng khi hợp).
-- `## Lệnh / script đề xuất` — nếu có; code block Tcl, chú thích tuỳ chọn, cảnh báo phiên bản.
+- `## ✅ Kết luận` — 3–7 gạch đầu dòng trả lời thẳng từng ý (Có/Không/Nên làm X vì Y). Viết mục này TRƯỚC (Write sớm).
+- `## 🛠 Áp dụng ngay` — các bước đánh số: lệnh/script (code block Tcl chạy được, chú thích từng tuỳ chọn), giá trị
+  đề xuất + lý do chọn, **cách kiểm tra kết quả** (report/lệnh nào, con số mong đợi), dấu hiệu sai và cách quay lui.
+- `## 🔍 Giải thích chi tiết` — cơ chế/công thức, phân tích số liệu thật (bảng), vì sao xảy ra.
+- `## ⚖️ Phương án & so sánh` — khi có ≥2 cách: bảng + khuyến nghị (bỏ mục nếu không áp dụng).
+- `## ⚠️ Lỗi thường gặp / lưu ý` — cạm bẫy, khác biệt phiên bản tool, điều kiện để kết luận đúng.
 - `## Nguồn` — **Trên máy**: đường dẫn (+ trang/dòng). **Web**: URL.
-- `## Độ tin cậy & cần kiểm chứng` — mức tin cậy, việc người hỏi nên chạy để xác nhận.
+- `## Độ tin cậy & cần kiểm chứng` — mức tin cậy từng kết luận, việc người hỏi nên chạy để xác nhận.
+- `## Đã trả lời đủ chưa?` — liệt kê từng ý (1), (2)… của câu hỏi → ✅ đã trả lời ở mục nào / ⚠️ còn thiếu gì.
 - `## Bài học` — để người hỏi học và để script tự gom sổ tay (giữ đúng định dạng):
   - `### Khái niệm chính` — 3–5 ý cốt lõi rút ra.
   - `### Thuật ngữ` — mỗi dòng: ``- **TERM** (tên đầy đủ/tiếng Việt): giải thích ngắn`` (chỉ thuật ngữ có trong bài).
@@ -39,8 +51,9 @@ bằng shell. Lệnh bị từ chối thì đổi sang Read/Grep, đừng bỏ q
 - Script sẽ tự thêm bảng "Kiểm chứng tự động" — đừng tự viết bảng đó.
 
 ## Hỏi tiếp
-Người hỏi viết dòng `>> …` trong file trả lời. Prompt "HỎI TIẾP" chỉ cần trả lời phần mới, đúng trọng tâm,
-dẫn chiếu phần trước thay vì lặp lại; vẫn tự kiểm chứng và có `## Bài học` nếu có khái niệm/lệnh mới.
+Người hỏi viết dòng `>> …` trong file trả lời. Prompt "HỎI TIẾP" kèm chuỗi hỏi đáp trước: giữ mạch lập luận
+(nói rõ điều gì giữ nguyên, điều gì thay đổi/bổ sung và vì sao), trả lời ĐẦY ĐỦ theo đúng cấu trúc và tiêu chuẩn
+chất lượng như câu hỏi mới (không qua loa), chỉ không lặp lại nguyên văn phần đã viết — dẫn chiếu "Lượt n".
 Không bao giờ bắt đầu một dòng bằng `>>` trong câu trả lời (dành cho người hỏi).
 
 ## Ràng buộc

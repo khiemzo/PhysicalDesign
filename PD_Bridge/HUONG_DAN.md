@@ -25,7 +25,11 @@ Bạn chỉ cần tạo một file câu hỏi. Mọi việc còn lại tự đ�
    Script tự tóm tắt report/log (WNS/TNS, top path, ERROR/WARN…) và đưa vào đề bài, nên Claude không tốn token mở file lớn. Dữ liệu được chuyển ra **kho trên máy ngoài** (không còn nằm trên OneDrive) và lưu vĩnh viễn.
 2b. **Chọn project** (tuỳ chọn): thêm `@ten_project` vào tên file (ví dụ `[sau] @median_filter hold.md`) hoặc dòng `du_an: median_filter` trong nội dung. Không ghi gì thì script tự nhận theo tên block xuất hiện trong câu hỏi (so với các thư mục trong physical design); không khớp thì vào project `chung`.
 3. Lưu file là xong. **Khoảng 2–3 giây** sau khi file có trên máy ngoài, `Qnnn_traloi.md` xuất hiện với trạng thái "⏳ Đã nhận" và Claude bắt đầu làm. Tên câu hỏi được đổi thành `Qnnn_<tên của bạn>.md`.
-   - Đo thực tế: phát hiện file và xác nhận "Đã nhận" sau 2–3 giây. Mode `nhanh` (Sonnet) xong sau khoảng 30 giây đến 1 phút. Mode `chuan` (Opus, suy nghĩ kỹ) hiện bản nháp Kết luận sau khoảng 2 phút và xong sau 4–5 phút. Mode `sau` có thể 20–40 phút.
+   - Đo thực tế: phát hiện file và hiện "⏳" sau 2–4 giây.
+     - Mode `nhanh` (Sonnet): xong sau 1–2 phút.
+     - Mode `chuan` (Opus, suy nghĩ rất kỹ, **có lượt rà soát**): hiện bản nháp Kết luận sau khoảng 5 phút, xong sau khoảng **10–15 phút**. Lần đo thật: 15 phút, câu trả lời 52 KB, lượt rà soát tự sửa 3 chỗ và tính lại toàn bộ số liệu.
+     - Mode `sau`: có thể 30–60 phút.
+   - Cần nhanh thì dùng `[nhanh]`. Muốn `chuan` nhanh hơn thì tắt lượt rà soát: đặt `"review_modes": ["sau"]` trong `config.json`.
    - Tối đa **2 câu chạy song song**, nên câu `nhanh` không phải chờ câu `sau` đang chạy.
    - Còn thêm thời gian OneDrive đồng bộ giữa hai máy (thường 5–30 giây). Phần này do OneDrive quyết định, script không điều khiển được.
 
@@ -39,6 +43,17 @@ Claude tự tìm report, log, script và tài liệu (kể cả Innovus Text Com
 
 Mọi mode đều cho câu trả lời đầy đủ, không giới hạn độ dài. Mode chỉ quyết định mức độ research.
 Viết `mode: sâu`, `Mode = Nhanh`… cũng được nhận.
+
+**Hai lượt cho mode chuan và sâu:**
+1. **Lượt 1 — nghiên cứu và viết:** Claude tra dữ liệu, tài liệu tool và web, rồi viết đủ các mục.
+2. **Lượt 2 — rà soát và hoàn thiện:** Claude đóng vai reviewer PD cấp cao, khắt khe, rồi kiểm lại từng điểm:
+   - đã trả lời đủ từng ý chưa;
+   - mỗi lệnh và tuỳ chọn có trong tài liệu không;
+   - mỗi con số có khớp nguồn không, phép tính có đúng không;
+   - phần "Áp dụng ngay" đã chạy được ngay chưa;
+   - còn thiếu rủi ro hay ảnh hưởng chéo nào không.
+
+   Claude sửa thẳng vào câu trả lời và ghi lại những gì đã sửa ở mục `## 🔎 Đã rà soát`. Nếu lượt rà soát lỗi, hệ thống giữ nguyên bản đầu.
 
 **Bố cục file trả lời `Qnnn_traloi.md`** — luôn đọc từ trên xuống, phần mới nhất ở đầu:
 
@@ -75,16 +90,18 @@ Trong lúc Claude làm, đầu file hiện **⏳ tiến độ** (cập nhật m�
 
 Trên OneDrive, `cau_hoi/` chỉ còn là hộp thư (giữ 5 lượt gần nhất). Bản đầy đủ luôn nằm trong kho.
 
-**Bộ nhớ đưa vào mỗi câu hỏi** (script làm, 0 token):
+**Mỗi câu hỏi được trả lời MỚI và độc lập:** mặc định hệ thống **không** đưa hỏi đáp cũ của câu khác vào đề bài, nên Claude không lặp lại câu trả lời cũ mà nghiên cứu và kiểm chứng lại từ đầu. Muốn bật lại thì đặt `"use_history": true` trong `config.json`.
+
+**Thông tin đưa vào mỗi câu hỏi** (script làm, 0 token):
 
 | Bộ nhớ | Tác dụng |
 |---|---|
-| Câu hỏi cũ liên quan | Tối đa 3 câu cùng chủ đề (ưu tiên cùng project và câu `dung`, bỏ câu `sai`), kèm kết luận và các lần hỏi tiếp |
-| Trong kho đã có | Tìm toàn văn trong hỏi đáp cũ và dữ liệu đã gửi của mọi project (ưu tiên project hiện tại) |
+| Trích sẵn tài liệu tool | Nội dung đúng trang/đoạn khớp nhất trong Text Command Reference trên máy, để Claude có căn cứ chính xác ngay từ đầu |
+| Dữ liệu bạn đã gửi | Tìm toàn văn trong report/log/script bạn từng gửi kèm (ưu tiên project hiện tại); không lấy câu trả lời cũ |
 | Bối cảnh + kiến thức | `BOI_CANH.md` và `KIEN_THUC.md` của project, `kien_thuc/` chung (✅ đã xác nhận, ◻️ chưa xác nhận) |
 | Từ điển đồng nghĩa | Thuật ngữ Việt → Anh (độ lệch → skew, xung nhịp → clock, nhiễu xuyên âm → crosstalk…) và viết tắt (CTS → ccopt, OCV → AOCV/POCV/derate, DRV → max_tran/max_cap…), giúp tìm đúng tài liệu tiếng Anh. Tìm được cả theo tên block và tên lệnh |
 
-**Tự học:** câu trả lời sau 14 ngày mà không bị đánh giá `sai` được script tự thêm vào mục ◻️ **Chưa xác nhận** trong `KIEN_THUC.md` của project. Claude vẫn dùng lại được các mục này nhưng phải kiểm chứng lại. Nếu sau đó bạn đánh giá `sai` thì mục tự bị gỡ; đánh giá `dung` thì thành ✅ ở lượt tổng hợp tuần.
+**Tự học (tắt mặc định, bật bằng `use_history`):** câu trả lời sau 14 ngày mà không bị đánh giá `sai` được script tự thêm vào mục ◻️ **Chưa xác nhận** trong `KIEN_THUC.md` của project. Claude vẫn dùng lại được các mục này nhưng phải kiểm chứng lại. Nếu sau đó bạn đánh giá `sai` thì mục tự bị gỡ; đánh giá `dung` thì thành ✅ ở lượt tổng hợp tuần.
 
 **Sổ tay (trên OneDrive, để đọc học):** `so_tay/so_lenh.md` gom mọi lệnh Innovus/Tcl, xếp theo nhóm lệnh. `so_tay/thuat_ngu.md` gom các thuật ngữ. Cả hai lấy từ mục Bài học của các câu trả lời, 0 token. Mỗi mục có ký hiệu:
 - ✅: câu nguồn đã được bạn xác nhận đúng.

@@ -26,6 +26,11 @@ Người hỏi là kỹ sư PD cần **áp dụng ngay vào công việc**. Câu
 - Mọi khẳng định quan trọng: dẫn số liệu thật (file:dòng / trang) hoặc nguồn; suy luận thì ghi "suy luận".
 - Có ví dụ số cụ thể (từ report của người hỏi nếu có): trước/sau, kỳ vọng thay đổi bao nhiêu.
 - Khi có nhiều cách làm: bảng so sánh (ưu/nhược/rủi ro/khi nào dùng) + khuyến nghị rõ ràng 1 cách.
+- Đào sâu tới gốc: giải thích cơ chế đến mức kỹ sư mới vào nghề cũng hiểu (công thức, sơ đồ chữ/ASCII nếu giúp
+  hiểu), nêu ảnh hưởng chéo (setup↔hold, timing↔power/area/DRC/congestion, các corner/mode).
+- Mỗi câu trả lời là MỚI và độc lập: không dựa vào hay nhắc lại câu trả lời của câu hỏi khác; mọi kết luận phải được
+  kiểm chứng lại từ dữ liệu/tài liệu/web ngay trong lần này.
+- Web: chuẩn ≥3 nguồn, sâu ≥6 nguồn (ưu tiên tài liệu hãng/app note/paper); ghi URL ở mục Nguồn.
 
 ## Cấu trúc câu trả lời (tiếng Việt, lệnh/thuật ngữ giữ tiếng Anh)
 - `## ✅ Kết luận` — 3–7 gạch đầu dòng trả lời thẳng từng ý (Có/Không/Nên làm X vì Y). Viết mục này TRƯỚC (Write sớm).
@@ -34,6 +39,7 @@ Người hỏi là kỹ sư PD cần **áp dụng ngay vào công việc**. Câu
 - `## 🔍 Giải thích chi tiết` — cơ chế/công thức, phân tích số liệu thật (bảng), vì sao xảy ra.
 - `## ⚖️ Phương án & so sánh` — khi có ≥2 cách: bảng + khuyến nghị (bỏ mục nếu không áp dụng).
 - `## ⚠️ Lỗi thường gặp / lưu ý` — cạm bẫy, khác biệt phiên bản tool, điều kiện để kết luận đúng.
+- `## ✔️ Checklist` — danh sách việc cần làm/kiểm tra theo thứ tự, đánh dấu được (- [ ] …).
 - `## Nguồn` — **Trên máy**: đường dẫn (+ trang/dòng). **Web**: URL.
 - `## Độ tin cậy & cần kiểm chứng` — mức tin cậy từng kết luận, việc người hỏi nên chạy để xác nhận.
 - `## Đã trả lời đủ chưa?` — liệt kê từng ý (1), (2)… của câu hỏi → ✅ đã trả lời ở mục nào / ⚠️ còn thiếu gì.
@@ -59,8 +65,8 @@ Không bao giờ bắt đầu một dòng bằng `>>` trong câu trả lời (d�
 ## Ràng buộc
 - Thư mục dữ liệu physical design là **chỉ đọc**: không sửa, không tạo file trong đó.
 - Chỉ ghi vào file đích được chỉ định (và `tong_hop/`, `kien_thuc/` khi làm tổng hợp tuần).
-  Kho project (`PD_Bridge_Kho/du_an/...`) chỉ để ĐỌC: hỏi đáp cũ, dữ liệu đã gửi, BOI_CANH.md, KIEN_THUC.md.
-- Kiến thức ◻️ (chưa xác nhận) dùng được nhưng phải kiểm chứng lại; ✅ là đã được người hỏi xác nhận.
+  Kho project (`PD_Bridge_Kho/du_an/.../du_lieu`, BOI_CANH.md, KIEN_THUC.md) chỉ để ĐỌC dữ liệu người hỏi đã gửi.
+  KHÔNG mở/trích các câu trả lời cũ trong `hoi_dap/` (trừ lượt trước của chính câu đang hỏi tiếp).
 - Tiết kiệm token: không đọc lại file đã đọc, không liệt kê cả cây thư mục, không in lại câu trả lời ra màn hình.
 - Kiến thức ✅ trong `kien_thuc/` đã được người hỏi xác nhận — ưu tiên dùng. Mục ❌ là điều từng trả lời sai.
 - Không bịa lệnh/tuỳ chọn. Không chắc thì nói rõ và chỉ cách kiểm tra (`help <cmd>`, `man <cmd>` trong Innovus).

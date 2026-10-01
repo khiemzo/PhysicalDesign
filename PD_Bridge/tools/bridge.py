@@ -67,9 +67,9 @@ DEFAULTS = {
     "routine": {"url": "", "token": "", "headers": {}},
     "models": {"nhanh": "sonnet", "chuan": "opus", "sau": "opus", "tong_hop": "sonnet",
                "fallback": "sonnet"},
-    "effort": {"nhanh": "medium", "chuan": "high", "sau": "xhigh", "tong_hop": "low"},
-    "max_turns": {"nhanh": 40, "chuan": 100, "sau": 250, "tong_hop": 40},
-    "timeout_min": {"nhanh": 20, "chuan": 50, "sau": 120, "tong_hop": 30},
+    "effort": {"nhanh": "high", "chuan": "xhigh", "sau": "max", "tong_hop": "low"},
+    "max_turns": {"nhanh": 50, "chuan": 120, "sau": 300, "tong_hop": 40},
+    "timeout_min": {"nhanh": 25, "chuan": 60, "sau": 150, "tong_hop": 30},
     "default_mode": "chuan",
     "debounce_seconds": 2,       # file ngừng thay đổi 2 giây là nhận
     "poll_seconds": 1,           # quét thư mục câu hỏi mỗi giây (0 token)
@@ -90,7 +90,11 @@ DEFAULTS = {
     "store_dir": None,               # kho project trên máy ngoài (mặc định %USERPROFILE%\\PD_Bridge_Kho)
     "auto_learn_days": 14,           # câu trả lời chưa bị đánh giá sai sau N ngày -> ◻️ chưa xác nhận
     "followup_max_turns": 60,
-    "max_workers": 2,                # chạy song song tối đa 2 câu (câu nhanh không phải chờ câu sâu)
+    "max_workers": 2,
+    "use_history": False,            # False: KHÔNG đưa hỏi đáp cũ của câu khác vào đề bài (mỗi câu trả lời mới hoàn toàn)
+    "review_modes": ["chuan", "sau"],  # lượt rà soát + hoàn thiện sau khi viết xong
+    "review_max_turns": 40,
+    "doc_excerpts": 3,               # đưa sẵn nội dung N đoạn tài liệu tool khớp nhất vào đề bài                # chạy song song tối đa 2 câu (câu nhanh không phải chờ câu sâu)
     "draft_chars": 8000,             # hiện bản nháp câu trả lời trong lúc Claude đang viết              # Claude im lặng quá lâu -> coi là treo, chạy lại
 }
 MODEL_NAMES = {"opus", "sonnet", "haiku", "fable"}
@@ -1183,6 +1187,8 @@ class Bridge:
             for part in parts:
                 low = part.lower()
                 score = sum(1 for t in terms if t in low)
+                if score and not self.cfg.get("use_history") and "◻️" in part:
+                    continue                                 # bỏ mục tự học (rút từ câu trả lời cũ)
                 if score:
                     name = f.name if f.parent == self.kien_thuc else f"{f.parent.name}/{f.name}"
                     bonus = 1 if proj and f.parent.name == pd_store.slug(proj) else 0
@@ -1207,6 +1213,33 @@ class Bridge:
         if len(t) <= 2500:
             return t
         return f"(file dài — đọc khi cần: {f})\n" + t[:1200]
+
+    def doc_excerpts(self, question: str) -> str:
+        """Nội dung các trang/đoạn tài liệu tool khớp nhất (script lấy, 0 token) -> Claude có căn cứ ngay."""
+        n = int(self.cfg.get("doc_excerpts", 3))
+        db = self.db_path()
+        if n <= 0 or not db or not db.exists():
+            return ""
+        try:
+            hits = pd_index.search(db, question, kind="doc", n=n)
+        except BaseException:  # noqa: BLE001
+            return ""
+        out = []
+        import sqlite3
+        try:
+            con = sqlite3.connect(str(db), timeout=30)
+        except Exception:  # noqa: BLE001
+            return ""
+        try:
+            for h in hits:
+                loc = h["locs"][0] if h["locs"] else ""
+                row = con.execute("SELECT body FROM chunks WHERE path=? AND loc=? LIMIT 1", (h["path"], loc)).fetchone()
+                txt = re.sub(r"[ \t]+", " ", re.sub(r"\n{3,}", "\n\n", (row[0] if row else "") or "")).strip()[:1800]
+                if txt:
+                    out.append(f"--- {h['path']}{' [' + loc + ']' if loc else ''}\n{txt}")
+        finally:
+            con.close()
+        return "\n".join(out)
 
     def pre_search(self, question: str) -> str:
         db = self.db_path()
@@ -1239,6 +1272,8 @@ class Bridge:
         proj = self.proj_of(qid)
         d = self.attachments_dir(qid)
         ex = [f"/hoi_dap/{qid}_"] + ([f"/du_lieu/{d.name}/"] if d else [])
+        if not self.cfg.get("use_history"):
+            ex.append("/hoi_dap/")                       # chỉ dữ liệu đã gửi, không lấy hỏi đáp cũ
         return "\n".join(self.store.search(question, proj, ex, n))
 
     def related_history(self, qid: str, question: str, n: int = 3) -> str:
@@ -1297,14 +1332,15 @@ class Bridge:
         "sau": ("SÂU — nghiên cứu nhiều vòng: (1) thu thập đủ dữ liệu trên máy (report/log/script các run liên "
                 "quan, so sánh giữa các run), (2) tài liệu Cadence/Synopsys trên máy, (3) web ≥5 nguồn: app note, "
                 "paper, tài liệu hãng, diễn đàn, (4) lập giả thuyết → kiểm chứng bằng số liệu → so sánh các "
-                "phương án (bảng ưu/nhược/rủi ro), (5) tự phản biện trước khi kết luận."),
+                "phương án (bảng ưu/nhược/rủi ro), (5) tự phản biện trước khi kết luận; đề xuất thí nghiệm "
+                "kiểm chứng (run nào, đo gì, kỳ vọng gì)."),
     }
 
     def build_prompt(self, qid: str, stem: str, mode: str, question: str, answer_tmp: Path,
                      edit: dict | None, raw_mode: str | None) -> str:
         att = self.attachment_context(qid)
         search_text = question + " " + parse_prefix(stem)[2]
-        hist = self.related_history(qid, search_text)
+        hist = self.related_history(qid, search_text) if self.cfg.get("use_history") else ""
         self.wait_reindex()
         gui_hits = self.search_gui(search_text, qid)
         proj = self.proj_of(qid)
@@ -1334,10 +1370,13 @@ class Bridge:
             "GỢI Ý TỪ CHỈ MỤC (tự động theo từ khoá câu hỏi, có thể chưa đủ):",
             self.pre_search(search_text),
         ]
+        ex = self.doc_excerpts(search_text)
+        if ex:
+            parts += ["", "TRÍCH SẴN TÀI LIỆU TOOL TRÊN MÁY (đoạn khớp nhất; đọc thêm trang lân cận khi cần):", ex]
         if hist:
             parts += ["", "CÂU HỎI CŨ LIÊN QUAN ĐÃ TRẢ LỜI (bộ nhớ — tận dụng, không research lại phần đã chắc chắn):", hist]
         if gui_hits:
-            parts += ["", f"TRONG KHO ĐÃ CÓ (dữ liệu đã gửi + hỏi đáp cũ; gốc kho/du_an = {self.store.du_an}):",
+            parts += ["", f"DỮ LIỆU BẠN ĐÃ GỬI TRƯỚC ĐÂY có liên quan (gốc kho/du_an = {self.store.du_an}):",
                       gui_hits]
         if att:
             parts += ["", "DỮ LIỆU NGƯỜI HỎI GỬI KÈM (ưu tiên phân tích; đã tóm tắt sẵn, mở file gốc khi cần chi tiết):", att]
@@ -1502,9 +1541,9 @@ class Bridge:
             *convo,
             "",
             "CÂU HỎI TIẾP MỚI:", "<<<", fu, ">>>", "",
-            "Yêu cầu: nối tiếp mạch lập luận các lượt trước (nêu rõ điểm nào giữ nguyên, điểm nào thay đổi/bổ sung "
-            "và vì sao); trả lời đầy đủ, sâu, áp dụng được ngay như một câu hỏi mới — không trả lời qua loa; tìm "
-            "thêm trên máy/web khi cần số liệu mới; tự kiểm chứng lệnh; có '## Bài học' nếu có khái niệm/lệnh mới.",
+            "Yêu cầu: hiểu ngữ cảnh các lượt trước nhưng KHÔNG nhắc lại/tóm tắt lại chúng; chỉ nói ngắn gọn nếu kết "
+            "luận cũ thay đổi. Trả lời câu hỏi tiếp đầy đủ, sâu, áp dụng được ngay như một câu hỏi mới — không qua "
+            "loa; tìm thêm trên máy/web khi cần; tự kiểm chứng lệnh; có '## Bài học' nếu có khái niệm/lệnh mới.",
             f"Ghi câu trả lời (Markdown, bắt đầu bằng '## ✅ Kết luận') vào file: {answer_tmp}",
             "Cuối cùng chỉ in: XONG",
         ])
@@ -1587,6 +1626,63 @@ class Bridge:
     def run_with_fallback(self, prompt: str, mode: str, model: str, run_dir: Path, answer_tmp: Path,
                           job: str, extra_dirs: list | None = None, resume: str | None = None,
                           max_turns: int | None = None, cur: dict | None = None) -> RunResult:
+        res = self._run_main(prompt, mode, model, run_dir, answer_tmp, job, extra_dirs, resume, max_turns, cur)
+        if self.answer_ok(answer_tmp) and res.session_id and mode in (self.cfg.get("review_modes") or []):
+            res = self.review_pass(res, mode, model, run_dir, answer_tmp, job, extra_dirs, cur)
+        return res
+
+    def review_pass(self, res: RunResult, mode: str, model: str, run_dir: Path, answer_tmp: Path, job: str,
+                    extra_dirs: list | None, cur: dict | None) -> RunResult:
+        """Lượt 2: reviewer PD senior đọc lại, kiểm chứng, bổ sung chỗ thiếu — sửa thẳng vào file."""
+        backup = run_dir / "answer_v1.md"
+        shutil.copy(answer_tmp, backup)
+        q = (cur or {}).get("question", "")
+        prompt = "\n".join([
+            "RÀ SOÁT & HOÀN THIỆN câu trả lời bạn vừa viết (đóng vai reviewer Physical Design senior, khắt khe).",
+            f"File câu trả lời: {answer_tmp}",
+            "Câu hỏi:", "<<<", q[:4000], ">>>", "",
+            "Kiểm tra lần lượt và SỬA THẲNG vào file (Edit), không viết lại từ đầu nếu không cần:",
+            "1. Đủ từng ý (1),(2)… của câu hỏi chưa? Ý nào trả lời chung chung/thiếu số liệu → bổ sung cụ thể.",
+            "2. Mỗi lệnh/tuỳ chọn: đã tra tài liệu trên máy chưa (pd_index.py search/show)? Sai → sửa; chưa thấy → "
+            "đánh dấu ⚠️ và cách kiểm (`help <lệnh>`).",
+            "3. Mỗi con số: khớp nguồn (file:dòng) chưa? Phép tính đúng chưa? Tính lại.",
+            "4. '🛠 Áp dụng ngay' có chạy được ngay không (thứ tự lệnh, biến, đường dẫn, cách kiểm tra + con số kỳ vọng, "
+            "cách quay lui)? Thiếu → bổ sung.",
+            "5. Còn thiếu góc nhìn quan trọng (rủi ro, ảnh hưởng setup/hold/power/area/DRC, khác biệt corner/phiên bản, "
+            "phương án thay thế)? Có mâu thuẫn nội bộ? → bổ sung/sửa. Nếu cần, tìm thêm trên máy/web.",
+            "6. Kết luận có trả lời thẳng, rõ ràng, nhất quán với phần chi tiết không?",
+            "Cuối file (trước '## Bài học' nếu có) thêm mục '## 🔎 Đã rà soát' liệt kê ngắn những gì đã sửa/bổ sung.",
+            f"Ghi kết quả vào file: {answer_tmp}",
+            "Cuối cùng chỉ in: XONG",
+        ])
+        if cur is not None:
+            cur["phase"] = "review"
+        log.info("   rà soát & hoàn thiện câu trả lời…")
+        cwd = self.root
+        add_dirs = [d for d in (self.data_dir, run_dir, self.tools, *(extra_dirs or [])) if d and Path(d).exists()]
+        deny = [self.data_dir] if self.data_dir else []
+
+        def progress(pg):
+            if cur:
+                self.progress[cur["qid"]] = pg
+                self.show_progress(cur, pg, answer_tmp)
+        r2 = self.runner.run(prompt, res.model or model, job, cwd, add_dirs, deny, self.allowed_tools(web=True),
+                             run_dir, tag="_review", resume=res.session_id,
+                             max_turns=int(self.cfg.get("review_max_turns", 40)), on_progress=progress)
+        if cur is not None:
+            cur.pop("phase", None)
+        old_len = len(read_text(backup))
+        if self.answer_ok(answer_tmp) and len(read_text(answer_tmp)) >= 0.8 * old_len:
+            log.info("   rà soát xong (%s, %d → %d ký tự)", r2.kind, old_len, len(read_text(answer_tmp)))
+            res.session_id = r2.session_id or res.session_id
+            return res
+        log.warning("   rà soát không đạt (%s) — giữ bản đầu", r2.kind)
+        shutil.copy(backup, answer_tmp)
+        return res
+
+    def _run_main(self, prompt: str, mode: str, model: str, run_dir: Path, answer_tmp: Path, job: str,
+                  extra_dirs: list | None, resume: str | None, max_turns: int | None,
+                  cur: dict | None) -> RunResult:
         cwd = self.root
         add_dirs = [d for d in (self.data_dir, run_dir, self.tools, *(extra_dirs or []))
                     if d and Path(d).exists()]
@@ -1840,11 +1936,13 @@ class Bridge:
                 d = read_text(answer_tmp).strip()
                 lim = int(self.cfg.get("draft_chars", 8000))
                 if d:
-                    draft = ("\n\n---\n\n**📝 Bản nháp (Claude đang viết tiếp, sẽ được thay bằng bản hoàn chỉnh):**\n\n"
+                    draft = ("\n\n---\n\n**📝 Bản nháp (đang viết/rà soát tiếp, sẽ được thay bằng bản hoàn chỉnh):**\n\n"
                              + escape_followups(d[:lim]) + ("\n\n…" if len(d) > lim else ""))
         except OSError:
             pass
-        msg = (f"⏳ **Đang xử lý** — {el // 60} phút {el % 60:02d} giây · {pg.get('steps', 0)} bước nghiên cứu · "
+        phase = "🔎 **Đang rà soát & hoàn thiện** (bản đầu đã xong)" if cur.get("phase") == "review" else \
+            "⏳ **Đang xử lý**"
+        msg = (f"{phase} — {el // 60} phút {el % 60:02d} giây · {pg.get('steps', 0)} bước nghiên cứu · "
                f"mode {cur['mode']} · model {model_short(cur['model'])}\n\nCác bước gần nhất:\n{steps}\n\n"
                f"_Tự cập nhật mỗi {int(float(self.cfg.get('progress_seconds', 10)))} giây; Claude im lặng quá "
                f"{self.cfg.get('stall_minutes', 5)} phút thì tự chạy lại._{draft}")
@@ -2088,7 +2186,8 @@ class Bridge:
             self.purge_trash()
             self.prune_runs()
             self.refresh_ratings()
-            n = self.store.auto_learn(self.read_journal(), now(), int(self.cfg.get("auto_learn_days", 14)))
+            n = self.store.auto_learn(self.read_journal(), now(), int(self.cfg.get("auto_learn_days", 14))) \
+                if self.cfg.get("use_history") else 0
             if n:
                 log.info("Tự học: %d mục ◻️ chưa xác nhận trong KIEN_THUC.md của các project", n)
         except Exception as e:  # noqa: BLE001

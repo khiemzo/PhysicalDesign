@@ -34,7 +34,7 @@ class Env:
         fake.chmod(0o755)
         self.kho = self.tmp / "kho"
         cfg = {"bridge_dir": str(self.root), "data_dir": str(self.data), "claude_cmd": str(fake),
-               "store_dir": str(self.kho),
+               "store_dir": str(self.kho), "review_modes": [],
                "debounce_seconds": DEB, "poll_seconds": 0.1}
         cfg.update(cfg_over)
         (self.home / "config.json").write_text(json.dumps(cfg))
@@ -433,10 +433,9 @@ class T(unittest.TestCase):
         self.e.ask("q2.md", "Hold median_filter sau CTS vẫn âm, so sánh với report tuần trước (VIOLATED reg2reg)")
         self.e.run(self.b)
         p = self.e.calls()[-1]["prompt"]
-        self.assertIn("CÂU HỎI CŨ LIÊN QUAN", p)
-        self.assertIn("Q001", p)
-        self.assertIn("✅ đã xác nhận đúng", p)
-        self.assertIn("TRONG KHO ĐÃ CÓ", p)
+        self.assertNotIn("CÂU HỎI CŨ LIÊN QUAN", p, "mặc định không đưa hỏi đáp cũ vào đề bài")
+        self.assertNotIn("hoi_dap/Q001", p)
+        self.assertIn("DỮ LIỆU BẠN ĐÃ GỬI TRƯỚC ĐÂY", p)
         self.assertIn("hold_0930.tarpt", p)
         self.assertIn(str(self.e.kho / "du_an"), self.e.calls()[-1]["args"])
         self.assertIn("PROJECT: median_filter", p)
@@ -712,6 +711,34 @@ class T(unittest.TestCase):
         self.assertIn("status=done", self.ans("Q001"))
         self.assertIn("status=done", self.ans("Q002"))
         self.assertLess(time.time() - t0, 3.2, "2 câu chạy song song (mỗi câu ~1.5s)")
+
+    def test_41_review_pass_and_doc_excerpts(self):
+        self.b.cfg["review_modes"] = ["chuan"]
+        self.e.script("lesson", "ok")
+        self.e.ask("q.md", "set_clock_uncertainty sau CTS nên đặt thế nào?")
+        self.e.run(self.b)
+        c = self.e.calls()
+        self.assertEqual(len(c), 2, "lượt 1 viết + lượt 2 rà soát")
+        self.assertTrue(c[1]["resume"])
+        self.assertIn("RÀ SOÁT & HOÀN THIỆN", c[1]["prompt"])
+        self.assertIn("TRÍCH SẴN TÀI LIỆU TOOL", c[0]["prompt"])
+        self.assertIn("reduce set_clock_uncertainty to jitter", c[0]["prompt"])
+        self.assertIn("status=done", self.ans())
+
+    def test_42_review_bad_result_keeps_first_version(self):
+        self.b.cfg["review_modes"] = ["chuan"]
+        self.e.script("lesson", "error")
+        self.e.ask("q.md", "CTS?")
+        self.e.run(self.b)
+        self.assertIn("fake_cmd_xyz", self.ans(), "rà soát lỗi -> giữ bản đầu")
+
+    def test_43_history_optional(self):
+        self.b.cfg["use_history"] = True
+        self.e.ask("q.md", "Hold median_filter sau CTS uncertainty?")
+        self.e.run(self.b)
+        self.e.ask("q2.md", "median_filter hold CTS uncertainty lần 2?")
+        self.e.run(self.b)
+        self.assertIn("CÂU HỎI CŨ LIÊN QUAN", self.e.calls()[-1]["prompt"])
 
 
 class TWatch(unittest.TestCase):

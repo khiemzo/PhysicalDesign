@@ -47,7 +47,7 @@ script = json.loads(script_p.read_text()) if script_p.exists() else []
 beh = script.pop(0) if script else "ok"
 script_p.write_text(json.dumps(script))
 with open(HOME / "fake_calls.jsonl", "a", encoding="utf-8") as f:
-    f.write(json.dumps({"beh": beh, "model": model, "args": args, "resume": resume,
+    f.write(json.dumps({"beh": beh, "model": model, "args": args, "resume": resume, "pid": os.getpid(),
                         "cwd": os.getcwd(), "api_key": os.environ.get("ANTHROPIC_API_KEY"),
                         "prompt": prompt}, ensure_ascii=False) + "\n")
 

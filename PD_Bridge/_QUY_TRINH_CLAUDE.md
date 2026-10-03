@@ -4,6 +4,11 @@ Tài liệu cho Claude (và người bảo trì). Người hỏi chỉ cần đ�
 
 ## 1. Luồng tự động (watcher, không cần chat)
 
+Chỉ chạy khi BẬT (`pdbat` → `bridge.py start` → watcher.ps1 ẩn → `bridge.py watch`). `pdtat` → `bridge.py stop`:
+tạo cờ `%LOCALAPPDATA%\PD_Bridge\tat`, watcher dừng claude đang chạy, ghi "⏸ đã tắt" vào câu dở, `_TRANG_THAI.md` = ĐÃ TẮT,
+rồi thoát (không thoát trong 15 giây thì buộc dừng theo `watcher.pid`). Còn cờ `tat` thì watcher/Task Scheduler không chạy.
+Câu dở dang (marker `running`) và hỏi tiếp đang chờ (`fu_pending`) được làm lại khi bật.
+
 ```
 cau_hoi/[mode] abc.md (hoặc thư mục kèm dữ liệu)  --(ổn định 2s)-->  đổi tên Q007_abc.md + Q007_traloi.md "⏳ Đã nhận"
      --> claude -p (model theo mode, cwd = PD_Bridge, --add-dir <physical design> <runs\Q007..>)
@@ -39,8 +44,9 @@ Trả lời ngay trong phiên chat (không chờ watcher, không tốn thêm m�
 2. Với mỗi câu: làm đúng theo prompt và `CLAUDE.md` (tìm trên máy + web), ghi câu trả lời vào file `answer.md` được chỉ định.
 3. Chạy: `python "<PD_Bridge>\tools\bridge.py" finish Q007` → ghi `cau_hoi/Q007_traloi.md` chuẩn định dạng.
 
-Lệnh hữu ích khác: `bridge.py status` (hàng đợi, hạn mức, chỉ mục), `bridge.py doctor` (kiểm tra cài đặt),
-`bridge.py weekly --force` (tổng hợp tuần ngay), `bridge.py stop` (dừng watcher).
+Lệnh hữu ích khác: `bridge.py status` (bật/tắt, hàng đợi, chỉ mục), `bridge.py doctor` (kiểm tra cài đặt),
+`bridge.py weekly --force` (tổng hợp tuần ngay), `bridge.py start` / `stop` (= `pdbat` / `pdtat`: bật / tắt hẳn hệ thống).
+Watcher chỉ chạy khi người dùng bật: nếu `claim` không thấy câu nào mà người dùng nói đã gửi, kiểm tra OneDrive đã đồng bộ chưa.
 
 ## 2b. Hỏi tiếp
 

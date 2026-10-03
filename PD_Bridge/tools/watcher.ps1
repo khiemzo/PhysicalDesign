@@ -1,6 +1,7 @@
 ﻿<#
-  watcher.ps1 — chạy nền trên máy ngoài (Task Scheduler khởi động lúc đăng nhập Windows).
-  - Giữ `python bridge.py watch` luôn chạy (tự khởi động lại khi lỗi hoặc khi bridge.py được cập nhật).
+  watcher.ps1 — chạy nền trên máy ngoài KHI BẠN BẬT (lệnh `pdbat` / shortcut "PD_Bridge - BAT").
+  - Giữ `python bridge.py watch` chạy (tự khởi động lại khi lỗi hoặc khi bridge.py được cập nhật).
+  - Tắt bằng `pdtat`: tạo cờ %LOCALAPPDATA%\PD_Bridge\tat -> watcher dừng hẳn, không tự chạy lại.
   - Chặn máy ngủ khi đang chạy.
   - Phát hiện câu hỏi mới, làm mới chỉ mục, dọn file cũ: đều là script cục bộ — 0 token.
   Chạy tay để xem trực tiếp:  powershell -ExecutionPolicy Bypass -File watcher.ps1 -Foreground
@@ -13,11 +14,19 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $HomeDir = Join-Path $env:LOCALAPPDATA 'PD_Bridge'
 New-Item -ItemType Directory -Force -Path $HomeDir | Out-Null
 $LogFile = Join-Path $HomeDir 'watcher.log'
+$OffFlag = Join-Path $HomeDir 'tat'
+$PidFile = Join-Path $HomeDir 'watcher_ps.pid'
 
 function Write-Log([string]$msg) {
     $line = '{0} PS {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
     try { Add-Content -Path $LogFile -Value $line -Encoding UTF8 } catch {}
     if ($Foreground) { Write-Host $line }
+}
+
+# ---- hệ thống đang TẮT (pdtat) -> không chạy
+if (Test-Path $OffFlag) {
+    if ($Foreground) { Write-Host 'PD_Bridge đang TẮT. Bật bằng: pdbat' }
+    exit 0
 }
 
 # ---- một phiên bản duy nhất
@@ -27,6 +36,7 @@ if (-not $created) {
     if ($Foreground) { Write-Host 'Watcher đã chạy nền rồi (xem watcher.log).' }
     exit 0
 }
+try { [IO.File]::WriteAllText($PidFile, "$PID") } catch {}
 
 # ---- chặn máy ngủ (ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
 try {
@@ -72,6 +82,7 @@ function Find-Python($cfg) {
 $fail = 0
 Write-Log 'watcher.ps1 bắt đầu'
 while ($true) {
+    if (Test-Path $OffFlag) { Write-Log 'Hệ thống đã TẮT (pdtat) — watcher.ps1 dừng.'; break }
     $cfg = Read-Config
     $py = Find-Python $cfg
     $bridge = $null
@@ -80,7 +91,7 @@ while ($true) {
     if (-not $py -or -not (Test-Path $bridge)) {
         Write-Log "Thiếu python ($py) hoặc bridge.py ($bridge) — chạy lại cai_dat.ps1. Thử lại sau 5 phút."
         if ($cfg) { Write-Status $cfg.bridge_dir "Watcher không chạy được: thiếu Python ($py) hoặc bridge.py — chạy lại cai_dat.ps1 trên máy ngoài." }
-        Start-Sleep -Seconds 300
+        for ($i = 0; $i -lt 60 -and -not (Test-Path $OffFlag); $i++) { Start-Sleep -Seconds 5 }
         continue
     }
     try { [void][PDB.Power]::SetThreadExecutionState([uint32]2147483649) } catch {}
@@ -106,6 +117,8 @@ while ($true) {
         try { $errTail = (Get-Content (Join-Path $HomeDir 'bridge_err.log') -Tail 8 -Encoding UTF8) -join ' | ' } catch {}
         Write-Status $cfg.bridge_dir "bridge.py lỗi liên tục ($fail lần, rc=$rc): $errTail"
     }
-    Start-Sleep -Seconds $wait
+    for ($i = 0; $i -lt $wait -and -not (Test-Path $OffFlag); $i++) { Start-Sleep -Seconds 1 }
 }
+try { Remove-Item $PidFile -ErrorAction SilentlyContinue } catch {}
+try { [void][PDB.Power]::SetThreadExecutionState([uint32]2147483648) } catch {}
 $mutex.ReleaseMutex()

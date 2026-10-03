@@ -94,8 +94,10 @@ DEFAULTS = {
     "use_history": False,            # False: KHÔNG đưa hỏi đáp cũ của câu khác vào đề bài (mỗi câu trả lời mới hoàn toàn)
     "review_modes": ["chuan", "sau"],  # lượt rà soát + hoàn thiện sau khi viết xong
     "review_max_turns": 40,
-    "doc_excerpts": 3,               # đưa sẵn nội dung N đoạn tài liệu tool khớp nhất vào đề bài                # chạy song song tối đa 2 câu (câu nhanh không phải chờ câu sâu)
-    "draft_chars": 8000,             # hiện bản nháp câu trả lời trong lúc Claude đang viết              # Claude im lặng quá lâu -> coi là treo, chạy lại
+    "doc_excerpts": 3,               # đưa sẵn nội dung N đoạn tài liệu tool khớp nhất vào đề bài
+    "draft_chars": 8000,             # hiện bản nháp câu trả lời trong lúc Claude đang viết
+    "idle_poll_seconds": 3,          # rảnh > 10 phút: quét thưa hơn (đỡ tốn tài nguyên)
+    "idle_stop_minutes": 0,          # >0: rảnh liên tục N phút thì tự TẮT (bật lại bằng pdbat); 0 = không tự tắt
 }
 MODEL_NAMES = {"opus", "sonnet", "haiku", "fable"}
 
@@ -393,6 +395,47 @@ class SingleInstance:
         self.path = path
         self.fh = None
 
+    def release(self) -> None:
+        if not self.fh:
+            return
+        try:
+            if IS_WIN:
+                import msvcrt
+                self.fh.seek(0)
+                msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        self.fh.close()
+        self.fh = None
+
+    def held_by_other(self) -> bool:
+        """True nếu tiến trình khác đang giữ khoá (dò không làm hỏng khoá)."""
+        if not self.path.exists():
+            return False
+        try:
+            fh = open(self.path, "a+")
+        except OSError:
+            return True
+        try:
+            if IS_WIN:
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            return False
+        except OSError:
+            return True
+        finally:
+            fh.close()
+
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.fh = open(self.path, "a+")
@@ -411,6 +454,131 @@ class SingleInstance:
         self.fh.write(str(os.getpid()))
         self.fh.flush()
         return True
+
+
+# ============================================================================ bật / tắt hệ thống
+def off_flag(home: Path) -> Path:
+    return home / "tat"          # có file này = hệ thống ĐÃ TẮT (watcher không chạy, không tự khởi động lại)
+
+
+def watcher_running(home: Path) -> bool:
+    return SingleInstance(home / "watcher.lock").held_by_other()
+
+
+def read_pid(f: Path) -> int | None:
+    try:
+        return int(f.read_text(encoding="utf-8", errors="replace").strip().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def child_pids(pid: int) -> list[int]:
+    """Các tiến trình con/cháu (Linux, đọc /proc) — để tắt cả claude đang chạy dở."""
+    kids: dict[int, list[int]] = {}
+    for d in Path("/proc").glob("[0-9]*"):
+        try:
+            ppid = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            kids.setdefault(ppid, []).append(int(d.name))
+        except (OSError, ValueError, IndexError):
+            continue
+    out, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def kill_pid_tree(pid: int) -> None:
+    if not pid or pid == os.getpid():
+        return
+    try:
+        if IS_WIN:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW)
+            return
+        for c in reversed(child_pids(pid)):
+            try:
+                os.kill(c, signal.SIGKILL)
+            except OSError:
+                pass
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def write_off_status(cfg: dict, reason: str) -> None:
+    """cau_hoi/_TRANG_THAI.md: báo ĐÃ TẮT để người hỏi biết từ xa."""
+    try:
+        qdir = Path(cfg["bridge_dir"]) / "cau_hoi"
+        if qdir.is_dir():
+            atomic_write(qdir / "_TRANG_THAI.md", "\n".join([
+                "# Trạng thái PD_Bridge (máy ngoài)", "",
+                f"- ⏹ **ĐÃ TẮT** lúc {ts_str(fmt='%Y-%m-%d %H:%M:%S')} — {reason}",
+                "- Câu hỏi gửi lúc tắt sẽ được trả lời khi bật lại.",
+                "- Bật lại trên máy ngoài: gõ `pdbat` (hoặc double-click shortcut **PD_Bridge - BAT** trên Desktop).", ""]))
+    except OSError:
+        pass
+
+
+def start_system(cfg: dict, home: Path, wait: float = 20) -> int:
+    off_flag(home).unlink(missing_ok=True)
+    (home / "stop").unlink(missing_ok=True)
+    if watcher_running(home):
+        print("PD_Bridge ĐANG BẬT sẵn rồi.")
+        return 0
+    home.mkdir(parents=True, exist_ok=True)
+    ps1 = TOOLS_DIR / "watcher.ps1"
+    if IS_WIN and ps1.exists():
+        cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(ps1)]
+    else:
+        cmd = [cfg.get("python") or sys.executable, str(TOOLS_DIR / "bridge.py"), "watch"]
+    # chạy tách khỏi cửa sổ lệnh: đóng cửa sổ pdbat không làm tắt hệ thống
+    NEW_GROUP, BREAKAWAY = 0x00000200, 0x01000000
+    variants = [{"creationflags": CREATE_NO_WINDOW | NEW_GROUP | BREAKAWAY},
+                {"creationflags": CREATE_NO_WINDOW | NEW_GROUP}] if IS_WIN else [{"start_new_session": True}]
+    err = None
+    for kw in variants:
+        try:
+            with open(home / "bridge_err.log", "ab") as ef:
+                subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=ef,
+                                 close_fds=True, **kw)
+            err = None
+            break
+        except OSError as e:          # vd. không được tách khỏi job của cửa sổ lệnh -> thử cách khác
+            err = e
+    if err:
+        print(f"Không bật được: {err}")
+        return 1
+    t0 = now()
+    while now() - t0 < wait:
+        if watcher_running(home):
+            print("✅ PD_Bridge ĐÃ BẬT (chạy nền, ẩn). Gửi câu hỏi vào OneDrive\\PD_Bridge\\cau_hoi. Tắt: pdtat")
+            return 0
+        time.sleep(0.5)
+    print(f"⚠️ Chưa thấy watcher chạy sau {wait:g} giây — xem {home / 'watcher.log'} và bridge_err.log")
+    return 1
+
+
+def stop_system(cfg: dict, home: Path, wait: float = 15) -> int:
+    """Tắt hẳn: kể cả khi đang trả lời dở (câu dở dang được làm lại khi bật)."""
+    off_flag(home).write_text(ts_str(), encoding="utf-8")
+    running = watcher_running(home)
+    t0 = now()
+    while running and now() - t0 < wait:
+        time.sleep(0.5)
+        running = watcher_running(home)
+    if running:                                   # không tự thoát được -> buộc dừng
+        kill_pid_tree(read_pid(home / "watcher.pid") or 0)
+        time.sleep(1)
+        running = watcher_running(home)
+    kill_pid_tree(read_pid(home / "watcher_ps.pid") or 0)   # vòng lặp watcher.ps1 (Windows)
+    if running:
+        print("⚠️ Không tắt được watcher — mở Task Manager, tắt python.exe chạy bridge.py")
+        return 1
+    write_off_status(cfg, "tắt bằng lệnh pdtat")
+    print("⏹ PD_Bridge ĐÃ TẮT (không chạy nền, không tự bật lại khi mở máy). Bật lại: pdbat")
+    return 0
 
 
 # ============================================================================ limit/error parsing
@@ -569,6 +737,13 @@ class ClaudeRunner:
         self.exe = find_claude(cfg)
         self._flags: set[str] | None = None
         self.compat = False          # True: bản claude cũ, chỉ dùng các cờ cơ bản
+        self.procs: set = set()      # tiến trình claude đang chạy
+        self.aborting = False        # đang tắt hệ thống: không xử lý kết quả nữa
+
+    def abort_all(self) -> None:
+        self.aborting = True
+        for p in list(self.procs):
+            kill_tree(p)
 
     def flags(self) -> set[str]:
         if self._flags is None:
@@ -678,6 +853,9 @@ class ClaudeRunner:
         except OSError as e:
             res.kind, res.text = "error", f"Không chạy được claude: {e}"
             return res
+        self.procs.add(proc)
+        if self.aborting:
+            kill_tree(proc)
         out_lines: list[bytes] = []
         err_buf: list[bytes] = []
         prog = {"steps": 0, "last": "", "t_last": now(), "t0": t0, "recent": [], "sid": ""}
@@ -742,6 +920,9 @@ class ClaudeRunner:
                     on_progress(dict(prog))
                 except Exception:
                     pass
+        self.procs.discard(proc)
+        while self.aborting:          # hệ thống đang tắt: bỏ dở, không ghi lỗi/thử lại (bật lại sẽ làm từ đầu)
+            time.sleep(3600)
         for t_ in th:
             t_.join(timeout=5)
         out_s = b"".join(out_lines).decode("utf-8", errors="replace")
@@ -840,6 +1021,7 @@ class Bridge:
         self.last_status = 0.0
         self.preflight_ok_until = 0.0
         self.last_error = ""
+        self.live: dict[str, tuple] = {}     # qid -> (cur, tiến độ, answer_tmp) của câu đang trả lời
         self.auth_cache: tuple[float, dict] = (0.0, {})
         sd = cfg.get("store_dir") or str(Path(os.environ.get("USERPROFILE") or Path.home()) / "PD_Bridge_Kho")
         self.store = pd_store.Store(Path(sd), self.data_dir)
@@ -1925,9 +2107,13 @@ class Bridge:
         atomic_write(a, text)
         return text
 
-    def show_progress(self, cur: dict, pg: dict, answer_tmp: Path | None) -> None:
+    def show_progress(self, cur: dict, pg: dict, answer_tmp: Path | None, stopped: bool = False) -> None:
         """Tiến độ + bản nháp đang viết, ghi vào file trả lời (lượt mới ở đầu)."""
         qid = cur["qid"]
+        if not stopped:
+            if self.runner.aborting:
+                return
+            self.live[qid] = (cur, dict(pg), answer_tmp)
         el = int(now() - pg.get("t0", now()))
         steps = "\n".join(f"- `{x}`" for x in pg.get("recent") or []) or "- _đang đọc câu hỏi, dữ liệu và suy nghĩ…_"
         draft = ""
@@ -1942,10 +2128,13 @@ class Bridge:
             pass
         phase = "🔎 **Đang rà soát & hoàn thiện** (bản đầu đã xong)" if cur.get("phase") == "review" else \
             "⏳ **Đang xử lý**"
+        if stopped:
+            phase = "⏸ **Hệ thống đã TẮT khi đang trả lời** — câu này sẽ được trả lời lại khi bật (`pdbat`). Đã làm"
         msg = (f"{phase} — {el // 60} phút {el % 60:02d} giây · {pg.get('steps', 0)} bước nghiên cứu · "
                f"mode {cur['mode']} · model {model_short(cur['model'])}\n\nCác bước gần nhất:\n{steps}\n\n"
-               f"_Tự cập nhật mỗi {int(float(self.cfg.get('progress_seconds', 10)))} giây; Claude im lặng quá "
-               f"{self.cfg.get('stall_minutes', 5)} phút thì tự chạy lại._{draft}")
+               + ("_Đã dừng lúc " + ts_str() + "._" if stopped else
+                  f"_Tự cập nhật mỗi {int(float(self.cfg.get('progress_seconds', 10)))} giây; Claude im lặng quá "
+                  f"{self.cfg.get('stall_minutes', 5)} phút thì tự chạy lại._") + draft)
         with self.io_lock:
             rounds = self.load_thread(qid)
             if rounds:
@@ -2368,6 +2557,7 @@ class Bridge:
             name = args[0] if args and isinstance(args[0], str) else getattr(fn, "__name__", "")
             self.active.discard(name)
             self.progress.pop(name, None)
+            self.live.pop(name, None)
 
     def internal_failure(self, qid: str, e: Exception) -> None:
         """Lỗi trong code (không phải Claude): thử lại vài lần, sau đó ghi lỗi rõ ràng thay vì treo."""
@@ -2514,35 +2704,79 @@ class Bridge:
         except OSError:
             pass
 
+    def shutdown(self, reason: str) -> None:
+        """Tắt ngay: dừng claude/chỉ mục đang chạy, ghi trạng thái ĐÃ TẮT (câu dở được làm lại khi bật)."""
+        log.info("TẮT hệ thống: %s", reason)
+        self.runner.abort_all()
+        if self.index_proc and self.index_proc.poll() is None:
+            kill_tree(self.index_proc)
+        for qid, (cur, pg, tmp) in list(self.live.items()):
+            try:
+                self.show_progress(cur, pg, tmp, stopped=True)
+            except Exception:  # noqa: BLE001
+                log.exception("ghi trạng thái tắt %s", qid)
+        write_off_status(self.cfg, reason)
+        if IS_WIN:
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)   # cho phép máy ngủ lại
+            except Exception:  # noqa: BLE001
+                pass
+
     def watch(self) -> int:
+        off = off_flag(self.home)
+        if off.exists():
+            log.info("Hệ thống đang TẮT (pdtat) — không chạy. Bật: pdbat")
+            return 0
         lock = SingleInstance(self.home / "watcher.lock")
         if not lock.acquire():
             log.info("Watcher khác đang chạy — thoát")
             return 0
+        pidf = self.home / "watcher.pid"
+        pidf.write_text(str(os.getpid()), encoding="utf-8")
         if self.cfg.get("prevent_sleep", True):
             prevent_sleep()
         stop = self.home / "stop"
         stop.unlink(missing_ok=True)
-        log.info("PD_Bridge watcher bắt đầu | câu hỏi: %s | dữ liệu: %s | claude: %s",
+        log.info("PD_Bridge watcher BẬT | câu hỏi: %s | dữ liệu: %s | claude: %s",
                  self.qdir, self.data_dir, self.runner.exe)
         self.housekeeping(force=True)
-        while True:
-            try:
-                self.tick()
-                self.write_status()
-            except Exception as e:  # noqa: BLE001
-                log.exception("tick lỗi")
-                self.last_error = f"tick lỗi: {e}"
-            if stop.exists() and not self.busy():
-                stop.unlink(missing_ok=True)
-                log.info("Nhận yêu cầu dừng — thoát")
-                return 0
-            if not self.busy() and self._code_mtime() != self.code_mtime:
-                log.info("bridge.py đã cập nhật — khởi động lại")
-                return 3
-            if self.cfg.get("prevent_sleep", True):
-                prevent_sleep()
-            time.sleep(float(self.cfg.get("poll_seconds", 5)))
+        last_act = now()
+        idle_stop = float(self.cfg.get("idle_stop_minutes", 0) or 0) * 60
+        try:
+            while True:
+                try:
+                    self.tick()
+                    self.write_status()
+                except Exception as e:  # noqa: BLE001
+                    log.exception("tick lỗi")
+                    self.last_error = f"tick lỗi: {e}"
+                if off.exists():
+                    self.shutdown("tắt bằng lệnh pdtat")
+                    return 0
+                busy = self.busy() or bool(self.active)
+                if busy:
+                    last_act = now()
+                if stop.exists() and not busy:
+                    stop.unlink(missing_ok=True)
+                    log.info("Nhận yêu cầu dừng — thoát")
+                    write_off_status(self.cfg, "dừng theo yêu cầu")
+                    return 0
+                if idle_stop and not busy and now() - last_act > idle_stop:
+                    off.write_text(ts_str(), encoding="utf-8")
+                    self.shutdown(f"tự tắt sau {idle_stop / 60:g} phút không có câu hỏi")
+                    return 0
+                if not busy and self._code_mtime() != self.code_mtime:
+                    log.info("bridge.py đã cập nhật — khởi động lại")
+                    return 3
+                if self.cfg.get("prevent_sleep", True):
+                    prevent_sleep()
+                idle = now() - last_act > 600
+                time.sleep(float(self.cfg.get("idle_poll_seconds" if idle else "poll_seconds", 3 if idle else 1)))
+        finally:
+            if read_pid(pidf) == os.getpid():
+                pidf.unlink(missing_ok=True)
+            lock.release()
 
     def run_once(self, now_flag: bool) -> None:
         """Xử lý hết việc đang chờ rồi thoát (dùng cho kiểm thử / chạy tay)."""
@@ -2572,7 +2806,9 @@ class Bridge:
 
     def status(self) -> str:
         new, rounds = self.scan()
-        lines = [f"Thư mục PD_Bridge : {self.root}",
+        on = watcher_running(self.home)
+        lines = ["Hệ thống          : " + ("🟢 ĐANG BẬT (tắt: pdtat)" if on else "⏹ ĐÃ TẮT (bật: pdbat)"),
+                 f"Thư mục PD_Bridge : {self.root}",
                  f"Thư mục dữ liệu   : {self.data_dir}",
                  f"Cấu hình/nhật ký  : {self.home}",
                  f"claude            : {self.runner.exe}",
@@ -2661,7 +2897,11 @@ def main(argv=None) -> int:
     f.add_argument("--model", default="chat")
     w = sub.add_parser("weekly")
     w.add_argument("--force", action="store_true")
-    sub.add_parser("stop")
+    for name in ("start", "stop"):
+        x = sub.add_parser(name)
+        x.add_argument("--cho", type=float, default=0, help="chờ N giây trước khi đóng cửa sổ")
+    st_ = [x for x in sub.choices.values() if x.prog.endswith(" status")][0]
+    st_.add_argument("--cho", type=float, default=0)
     a = ap.parse_args(argv)
     cfg = load_config()
     home = home_dir()
@@ -2670,10 +2910,10 @@ def main(argv=None) -> int:
     state = State(home / "state.json")
     if a.cmd == "doctor":
         return doctor(cfg)
-    if a.cmd == "stop":
-        (home / "stop").write_text("stop", encoding="utf-8")
-        print("Đã gửi yêu cầu dừng watcher.")
-        return 0
+    if a.cmd in ("start", "stop"):
+        rc = start_system(cfg, home) if a.cmd == "start" else stop_system(cfg, home)
+        time.sleep(a.cho)
+        return rc
     b = Bridge(cfg, state)
     if a.cmd == "watch":
         return b.watch()
@@ -2682,6 +2922,7 @@ def main(argv=None) -> int:
         return 0
     if a.cmd == "status":
         print(b.status())
+        time.sleep(a.cho)
         return 0
     if a.cmd == "weekly":
         print(b.weekly(force=a.force))

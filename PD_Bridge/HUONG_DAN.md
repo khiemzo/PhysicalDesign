@@ -6,6 +6,34 @@ Bạn chỉ cần tạo một file câu hỏi. Mọi việc còn lại tự đ�
 2. Watcher bật Claude Code ngay trên máy đó. Claude tự tìm dữ liệu trong thư mục **physical design** (report, log, script, tài liệu) rồi research thêm trên web.
 3. Câu trả lời `Qnnn_traloi.md` được ghi vào thư mục câu hỏi, rồi OneDrive (tài khoản cá nhân `khuongmat456@gmail.com`) đồng bộ về máy bạn.
 
+Hệ thống **chỉ chạy khi bạn bật**. Khi tắt, máy ngoài không tốn tài nguyên gì.
+
+## Bật / tắt hệ thống (trên máy ngoài)
+
+| Việc | Gõ lệnh (cmd hoặc PowerShell) | Hoặc double-click trên Desktop |
+|---|---|---|
+| **Bật** (chạy nền, ẩn; nhận câu hỏi) | `pdbat` | **PD_Bridge - BAT** |
+| **Tắt hẳn** | `pdtat` | **PD_Bridge - TAT** |
+| Xem đang bật hay tắt, hàng đợi | `pdtt` | **PD_Bridge - TRANG THAI** |
+| Kiểm tra cài đặt, đăng nhập | `pd doctor` | — |
+| Trả lời các câu đang chờ rồi thoát (không chạy nền) | `pd once` | — |
+
+- **Mặc định không tự chạy khi mở máy.** Mỗi lần cần dùng thì gõ `pdbat`; dùng xong gõ `pdtat`.
+- `pdtat` tắt ngay, kể cả khi Claude đang trả lời dở. File trả lời ghi "⏸ Hệ thống đã TẮT khi đang trả lời", và câu đó được trả lời lại từ đầu ở lần bật sau.
+- Câu hỏi gửi lúc hệ thống tắt vẫn nằm trong OneDrive. Khi bật, chúng được trả lời theo thứ tự.
+- Đã tắt là tắt hẳn: không tự bật lại, kể cả khi khởi động lại máy, cho tới khi bạn gõ `pdbat`.
+- Từ xa (máy bạn) xem `cau_hoi/_TRANG_THAI.md` trên OneDrive. Khi hệ thống tắt, file ghi "⏹ ĐÃ TẮT lúc …".
+- Muốn tự bật mỗi lần đăng nhập Windows: chạy lại `cai_dat.ps1 -AutoStart`. Muốn bỏ: chạy lại `cai_dat.ps1` (không kèm `-AutoStart`).
+- Muốn tự tắt khi rảnh: đặt `"idle_stop_minutes": 60` trong `%LOCALAPPDATA%\PD_Bridge\config.json`. Hệ thống sẽ tự tắt sau 60 phút không có câu hỏi; mặc định là 0 (không tự tắt).
+
+**Tài nguyên dùng:**
+
+| Trạng thái | Tài nguyên |
+|---|---|
+| **Tắt** | 0: không có tiến trình nào, máy ngủ bình thường |
+| **Bật, đang rảnh** | Một tiến trình Python nhỏ (khoảng 30–50 MB RAM, gần 0% CPU), quét thư mục mỗi 1 giây, rảnh quá 10 phút thì mỗi 3 giây. Máy không tự ngủ trong lúc bật |
+| **Bật, đang trả lời** | Thêm Claude Code (khoảng 200–400 MB RAM) cho mỗi câu, tối đa 2 câu song song |
+
 ## Cách hỏi
 
 1. Trong `cau_hoi/`, tạo một file `.md` (hoặc `.txt`). **Tên file quyết định mode và model**:
@@ -131,12 +159,12 @@ Trên OneDrive, `cau_hoi/` chỉ còn là hộp thư (giữ 5 lượt gần nh�
 | 1 | Trên máy ngoài, đăng nhập ứng dụng OneDrive bằng tài khoản **khuongmat456@gmail.com**, rồi chờ đồng bộ xong |
 | 2 | Mở PowerShell và chạy: `powershell -ExecutionPolicy Bypass -File "C:\Users\khiem\OneDrive\PD_Bridge\tools\cai_dat.ps1"` |
 | 3 | Trả lời **Y** các câu script hỏi: chuyển PD_Bridge vào OneDrive của khuongmat456@gmail.com (nếu đang ở chỗ khác), cài Python / Git / Claude Code nếu thiếu. Trình duyệt sẽ mở để bạn đăng nhập Claude (tài khoản Pro của bạn) |
-| 4 | Để máy bật và đăng nhập Windows. Script hỏi có đặt "gập nắp khi cắm sạc thì không ngủ" hay không; watcher cũng tự chặn máy ngủ |
+| 4 | Script tạo lệnh `pdbat` / `pdtat` / `pdtt` và 3 shortcut trên Desktop, rồi bật hệ thống một lần để chạy thử. Từ đó, mỗi lần cần dùng thì gõ `pdbat` (lệnh có hiệu lực ở cửa sổ cmd/PowerShell mở **mới**) |
 
 - Script tự tìm thư mục OneDrive của tài khoản `khuongmat456@gmail.com` (thường là `C:\Users\<tên>\OneDrive`). Muốn dùng tài khoản khác thì thêm `-OneDriveAccount <email>`.
 - Thư mục dữ liệu mặc định là `D:\K\K\physical design`. Nếu không thấy, script tự tìm thư mục tên `physical design` hoặc hỏi bạn. Muốn chỉ định thì thêm `-DataDir "…"`.
 - Ngay sau bước 3, câu hỏi thử `cts skew uncertainty.md` đang chờ sẽ được trả lời. Đó là bài kiểm tra toàn tuyến; nếu không cần, xoá file đó trước khi chạy.
-- Cấu hình và nhật ký nằm ở `%LOCALAPPDATA%\PD_Bridge`, không nằm trong OneDrive. Gỡ watcher: chạy `cai_dat.ps1 -Uninstall`.
+- Cấu hình và nhật ký nằm ở `%LOCALAPPDATA%\PD_Bridge`, không nằm trong OneDrive. Lệnh `pdbat`/`pdtat`/`pdtt`/`pd` nằm ở `%LOCALAPPDATA%\PD_Bridge\bin` (đã thêm vào PATH). Gỡ: chạy `cai_dat.ps1 -Uninstall`.
 
 ## Quyền cần cấp để hệ thống tự chạy
 
@@ -145,7 +173,7 @@ Trên OneDrive, `cau_hoi/` chỉ còn là hộp thư (giữ 5 lượt gần nh�
 | 1 | Đăng nhập tài khoản **OneDrive khuongmat456@gmail.com** trên máy ngoài, thư mục PD_Bridge ở chế độ "Always keep on this device" (script tự đặt) | Ứng dụng OneDrive trên máy ngoài | Bắt buộc |
 | 2 | Chạy script PowerShell một lần: `-ExecutionPolicy Bypass` (không cần quyền admin) | PowerShell | Bắt buộc |
 | 3 | Đăng nhập **Claude Code** bằng tài khoản Claude (Pro/Max), không dùng API key | Trình duyệt mở ra khi chạy `cai_dat.ps1` | Bắt buộc |
-| 4 | Cho phép tạo **Task Scheduler** cho user hiện tại (nếu công ty chặn, script tự dùng thư mục Startup) | Windows | Bắt buộc (tự động) |
+| 4 | Thêm `%LOCALAPPDATA%\PD_Bridge\bin` vào PATH của user và tạo shortcut Desktop (script tự làm). Task Scheduler chỉ dùng khi chọn `-AutoStart` | Windows | Tự động |
 | 5 | Cài Python, Git for Windows, Claude Code qua winget hoặc trình cài chính thức | Windows | Chỉ khi máy chưa có |
 | 6 | Đọc thư mục `D:\K\K\physical design` (Claude chỉ đọc; quyền ghi bị chặn ở cấp permission) | Máy ngoài | Bắt buộc |
 | 6b | Tạo thư mục kho `%USERPROFILE%\PD_Bridge_Kho` (script tự tạo; đổi chỗ bằng `-StoreDir`) | Máy ngoài | Tự động |
@@ -168,18 +196,27 @@ Chỉ mục tìm kiếm nằm ở `D:\K\K\physical design\.pd_index\index.db`. N
 
 `kien_thuc/boi_canh_du_an.md` được đưa vào mọi câu hỏi. Hãy ghi ngắn gọn tên block, flow và phiên bản tool để câu trả lời sát dự án hơn.
 
-## Lệnh kiểm tra (chạy trong PowerShell, 0 token)
+## Bảng lệnh (0 token)
 
-    python "<PD_Bridge>\tools\bridge.py" status     # hàng đợi, hạn mức, chỉ mục
-    python "<PD_Bridge>\tools\bridge.py" doctor     # kiểm tra cài đặt, đăng nhập
-    python "<PD_Bridge>\tools\bridge.py" stop       # dừng watcher (Task Scheduler sẽ bật lại lần đăng nhập sau)
+| Lệnh ngắn | Lệnh đầy đủ | Tác dụng |
+|---|---|---|
+| `pdbat` | `python "<PD_Bridge>\tools\bridge.py" start` | Bật hệ thống (chạy nền, ẩn). Đang bật rồi thì không bật thêm |
+| `pdtat` | `python "<PD_Bridge>\tools\bridge.py" stop` | Tắt hẳn, kể cả câu đang trả lời dở (được làm lại khi bật) |
+| `pdtt` | `python "<PD_Bridge>\tools\bridge.py" status` | 🟢 ĐANG BẬT / ⏹ ĐÃ TẮT, hàng đợi, chỉ mục, đánh giá |
+| `pd doctor` | `… bridge.py doctor` | Kiểm tra cài đặt, đăng nhập Claude |
+| `pd once` | `… bridge.py once` | Trả lời hết các câu đang chờ rồi thoát (không chạy nền) |
+| `pd weekly --force` | `… bridge.py weekly --force` | Tổng hợp tuần ngay |
+| `pd watch` | `… bridge.py watch` | Chạy ở cửa sổ hiện tại để xem trực tiếp (Ctrl+C để dừng) |
+
+Nếu gõ `pdbat` mà báo "not recognized", hãy mở cửa sổ mới. Nếu vẫn không được, dùng lệnh đầy đủ, hoặc chạy lại `cai_dat.ps1`.
 
 ## Sự cố thường gặp
 
 | Hiện tượng | Cách xử lý |
 |---|---|
 | File trả lời đứng ở "⏳ Đang xử lý" | Xem file: tiến độ cập nhật mỗi 10 giây (thời gian, số bước, 5 bước gần nhất). Nếu Claude im lặng quá **5 phút**, watcher tự dừng lượt đó và chạy lại (tối đa 8 lần, rồi báo lỗi rõ ràng) |
-| Muốn biết máy ngoài đang ra sao | Mở `cau_hoi/_TRANG_THAI.md` (ngay trên OneDrive, cập nhật mỗi phút): đăng nhập Claude, việc đang làm, lỗi gần nhất, nhật ký. Nếu giờ cập nhật đã cũ nghĩa là watcher hoặc máy ngoài đã dừng |
+| Gửi câu hỏi mà không thấy "⏳ Đã nhận" | Hệ thống đang tắt. Trên máy ngoài gõ `pdbat` (hoặc double-click **PD_Bridge - BAT**) |
+| Muốn biết máy ngoài đang ra sao | Mở `cau_hoi/_TRANG_THAI.md` (ngay trên OneDrive, cập nhật mỗi phút khi bật): bật/tắt, đăng nhập Claude, việc đang làm, lỗi gần nhất, nhật ký. Không ghi "ĐÃ TẮT" mà giờ cập nhật đã cũ nghĩa là máy ngoài đã tắt/ngủ |
 | "⚠️ Chưa chạy được: … CHƯA ĐĂNG NHẬP" | Trên máy ngoài chạy `claude auth login`. Watcher tự thử lại mỗi 10 phút |
 | Không có câu trả lời sau ~10 phút | Xem `%LOCALAPPDATA%\PD_Bridge\watcher.log`. Kết quả từng lượt (prompt, output) nằm trong thư mục `runs\` cạnh đó |
 | Log ghi "chua dang nhap" | Mở PowerShell, gõ `claude` rồi đăng nhập lại (hoặc `claude auth login`) |

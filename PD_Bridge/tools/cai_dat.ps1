@@ -8,6 +8,8 @@
     -StoreDir "D:\PD_Bridge_Kho"         kho project trên máy ngoài, KHÔNG đồng bộ OneDrive (mặc định %USERPROFILE%\PD_Bridge_Kho)
     -DataDir "D:\K\K\physical design"   thư mục dữ liệu (mặc định: giữ cấu hình cũ hoặc D:\K\K\physical design)
     -Yes                                trả lời Y cho mọi câu hỏi
+    -AutoStart                          tự BẬT khi đăng nhập Windows (mặc định: KHÔNG — chỉ chạy khi gõ pdbat)
+    -NoStart                            cài xong không bật ngay
     -Uninstall                          gỡ watcher (giữ nguyên câu hỏi/trả lời/kiến thức)
     -Runner routine -RoutineUrl <url> -RoutineToken <token>
                                         dự phòng khi không cài được Claude Code (gọi routine trên cloud)
@@ -22,7 +24,8 @@ param(
     [string]$RoutineUrl = '',
     [string]$RoutineToken = '',
     [switch]$Yes,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$AutoStart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,6 +34,8 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $TaskName = 'PD_Bridge Watcher'
 $HomeDir  = Join-Path $env:LOCALAPPDATA 'PD_Bridge'
 $CfgPath  = Join-Path $HomeDir 'config.json'
+$BinDir   = Join-Path $HomeDir 'bin'
+$OffFlag  = Join-Path $HomeDir 'tat'
 $SrcRoot  = Split-Path -Parent $PSScriptRoot            # thư mục PD_Bridge chứa tools\
 $DefaultData = 'D:\K\K\physical design'
 New-Item -ItemType Directory -Force -Path $HomeDir | Out-Null
@@ -68,6 +73,21 @@ function Stop-Watcher {
     } catch {}
 }
 
+function Remove-Shortcuts {
+    $desk = [Environment]::GetFolderPath('Desktop')
+    foreach ($n in @('PD_Bridge - BAT.lnk', 'PD_Bridge - TAT.lnk', 'PD_Bridge - TRANG THAI.lnk')) {
+        $f = Join-Path $desk $n
+        if (Test-Path $f) { Remove-Item $f -Force }
+    }
+}
+
+function Remove-UserPath([string]$dir) {
+    $cur = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not $cur) { return }
+    $new = ($cur -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ne $dir.TrimEnd('\')) }) -join ';'
+    if ($new -ne $cur) { [Environment]::SetEnvironmentVariable('Path', $new, 'User') }
+}
+
 function Remove-StartupShortcut {
     $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'PD_Bridge Watcher.lnk'
     if (Test-Path $lnk) { Remove-Item $lnk -Force }
@@ -76,9 +96,13 @@ function Remove-StartupShortcut {
 # =============================================================================== GỠ CÀI ĐẶT
 if ($Uninstall) {
     Step 'Gỡ PD_Bridge watcher'
+    Set-Content -Path $OffFlag -Value 'go cai dat' -Encoding UTF8
     Stop-Watcher
     try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     Remove-StartupShortcut
+    Remove-Shortcuts
+    Remove-UserPath $BinDir
+    if (Test-Path $BinDir) { Remove-Item $BinDir -Recurse -Force }
     Ok "Đã gỡ watcher. Cấu hình/nhật ký vẫn ở $HomeDir (xoá tay nếu muốn)."
     Ok 'Thư mục PD_Bridge trong OneDrive (câu hỏi, trả lời, kiến thức) được giữ nguyên.'
     exit 0
@@ -276,51 +300,75 @@ if ($Runner -eq 'routine') { $cfg['routine'] = [ordered]@{ url = $RoutineUrl; to
 $cfg | ConvertTo-Json -Depth 6 | Set-Content -Path $CfgPath -Encoding UTF8
 Ok "Đã ghi $CfgPath"
 
-# =============================================================================== 6. WATCHER (TASK SCHEDULER)
-Step '6. Watcher chạy nền'
+# =============================================================================== 6. LỆNH BẬT / TẮT
+Step '6. Lệnh bật/tắt (chỉ chạy khi bạn cần)'
 Stop-Watcher
-$watcher = Join-Path $Bridge 'tools\watcher.ps1'
+$bridgePy = Join-Path $Bridge 'tools\bridge.py'
+$watcher  = Join-Path $Bridge 'tools\watcher.ps1'
 $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$arg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watcher`""
-$user = "$env:USERDOMAIN\$env:USERNAME"
-$registered = $false
+
+# 6a. lệnh pdbat / pdtat / pdtt / pd (gõ được ở mọi cửa sổ cmd/PowerShell mới)
+New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+$cmds = [ordered]@{
+    'pdbat' = 'start'
+    'pdtat' = 'stop'
+    'pdtt'  = 'status'
+    'pd'    = '%*'
+}
+foreach ($k in $cmds.Keys) {
+    $body = "@echo off`r`n`"$py`" `"$bridgePy`" $($cmds[$k])`r`n"
+    [IO.File]::WriteAllText((Join-Path $BinDir "$k.cmd"), $body, (New-Object Text.UTF8Encoding($false)))
+}
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (-not $userPath) { $userPath = '' }
+if (-not (($userPath -split ';') | Where-Object { $_.TrimEnd('\') -eq $BinDir.TrimEnd('\') })) {
+    [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $BinDir).TrimStart(';')), 'User')
+}
+if (-not (($env:Path -split ';') -contains $BinDir)) { $env:Path = "$env:Path;$BinDir" }
+Ok "Lệnh: pdbat (bật) · pdtat (tắt) · pdtt (trạng thái) · pd <lệnh> — trong $BinDir (mở cửa sổ mới để dùng)"
+
+# 6b. shortcut trên Desktop (double-click)
 try {
-    $action = New-ScheduledTaskAction -Execute $psExe -Argument $arg
-    $triggers = @(New-ScheduledTaskTrigger -AtLogOn -User $user)
-    try {   # chạy lại mỗi 5 phút nếu watcher bị tắt (IgnoreNew: không chạy trùng)
-        $rep = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
-        $triggers += $rep
-    } catch {}
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
-                -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-                -MultipleInstances IgnoreNew
-    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Settings $settings `
-                           -Principal $principal -Force | Out-Null
-    Remove-StartupShortcut
-    $registered = $true
-    Ok "Task Scheduler: '$TaskName' (chạy khi đăng nhập Windows)"
-} catch {
-    Warn "Không tạo được Task Scheduler ($_) — dùng lối tắt trong thư mục Startup."
     $ws = New-Object -ComObject WScript.Shell
-    $lnk = $ws.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Startup')) 'PD_Bridge Watcher.lnk'))
-    $lnk.TargetPath = $psExe
-    $lnk.Arguments = $arg
-    $lnk.WindowStyle = 7
-    $lnk.Save()
-    Ok 'Đã tạo lối tắt Startup.'
+    $desk = [Environment]::GetFolderPath('Desktop')
+    foreach ($it in @(@('PD_Bridge - BAT', 'start', 'Bật PD_Bridge (chạy nền, ẩn)'),
+                      @('PD_Bridge - TAT', 'stop', 'Tắt hẳn PD_Bridge'),
+                      @('PD_Bridge - TRANG THAI', 'status', 'Xem PD_Bridge đang bật hay tắt'))) {
+        $lnk = $ws.CreateShortcut((Join-Path $desk "$($it[0]).lnk"))
+        $lnk.TargetPath = $py
+        $lnk.Arguments = "`"$bridgePy`" $($it[1]) --cho 6"
+        $lnk.WorkingDirectory = $HomeDir
+        $lnk.Description = $it[2]
+        $lnk.Save()
+    }
+    Ok 'Desktop: "PD_Bridge - BAT", "PD_Bridge - TAT", "PD_Bridge - TRANG THAI"'
+} catch { Warn "Không tạo được shortcut Desktop ($_) — dùng lệnh pdbat/pdtat." }
+
+# 6c. tự bật khi đăng nhập: chỉ khi chọn -AutoStart (mặc định tắt để không tốn tài nguyên)
+Remove-StartupShortcut
+try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+if ($AutoStart) {
+    $arg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"Remove-Item -LiteralPath '$OffFlag' -ErrorAction SilentlyContinue; & '$watcher'`""
+    $user = "$env:USERDOMAIN\$env:USERNAME"
+    try {
+        $action = New-ScheduledTaskAction -Execute $psExe -Argument $arg
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+        $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
+                               -Principal $principal -Force | Out-Null
+        Ok "Tự BẬT khi đăng nhập Windows (Task Scheduler '$TaskName'). Bỏ: chạy lại cai_dat.ps1 không có -AutoStart"
+    } catch { Warn "Không tạo được Task Scheduler ($_) — bật tay bằng pdbat." }
+} else {
+    Ok 'Không tự chạy khi mở máy — chỉ chạy khi bạn gõ pdbat (hoặc double-click "PD_Bridge - BAT").'
 }
 
-if (-not $NoStart) {
-    if ($registered) { Start-ScheduledTask -TaskName $TaskName }
-    else { Start-Process $psExe -ArgumentList $arg -WindowStyle Hidden }
-    $log = Join-Path $HomeDir 'watcher.log'
-    $ok = $false
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Seconds 1
-        if ((Test-Path $log) -and ((Get-Content $log -Tail 20 -Encoding UTF8) -match 'watcher bắt đầu')) { $ok = $true; break }
-    }
-    if ($ok) { Ok 'Watcher đang chạy.' } else { Warn "Chưa thấy watcher khởi động — xem $log và bridge_err.log" }
+if ($NoStart) {
+    Set-Content -Path $OffFlag -Value 'cai dat -NoStart' -Encoding UTF8
+    Ok 'Chưa bật (NoStart). Bật: pdbat'
+} else {
+    & $py $bridgePy start
 }
 
 # =============================================================================== 6b. NGUỒN ĐIỆN
@@ -342,7 +390,9 @@ Say 'XONG. Cách dùng:' 'Cyan'
 Say "  - Tạo file .md trong: $(Join-Path $Bridge 'cau_hoi')  (ví dụ: [sau] hold sau cts.md)"
 Say '  - Vài giây sau khi lưu, Claude bắt đầu; câu trả lời là Qnnn_traloi.md cùng thư mục.'
 Say '  - Tên file: [nhanh] / [chuan] / [sau] (+ -sonnet/-opus) để chọn mode/model; thư mục = câu hỏi kèm dữ liệu.'
+Say '  - BẬT: pdbat   ·   TẮT: pdtat   ·   TRẠNG THÁI: pdtt   (hoặc shortcut PD_Bridge trên Desktop)' 'Green'
+Say '  - Chỉ khi BẬT mới nhận câu hỏi; câu gửi lúc tắt sẽ được trả lời khi bật lại.'
 Say "  - Nhật ký: $(Join-Path $HomeDir 'watcher.log')"
-Say '  - Để máy bật + đăng nhập Windows, không gập nắp laptop.'
+Say '  - Khi đang bật: để máy chạy, không gập nắp laptop (máy không tự ngủ trong lúc bật).'
 $test = Join-Path $Bridge 'cau_hoi\cts skew uncertainty.md'
 if (Test-Path $test) { Say "  - Câu hỏi thử '$([IO.Path]::GetFileName($test))' sẽ được trả lời ngay (kiểm tra toàn tuyến)." }

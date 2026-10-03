@@ -773,6 +773,90 @@ class TWatch(unittest.TestCase):
             e.cleanup()
 
 
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:   # zombie = đã chết
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+class TOnOff(unittest.TestCase):
+    """Bật/tắt hệ thống: start/stop/status, tắt khi đang trả lời dở, tự tắt khi rảnh."""
+
+    def cli(self, *a, timeout=60):
+        return subprocess.run([sys.executable, str(TOOLS / "bridge.py"), *a], env=os.environ,
+                              capture_output=True, text=True, timeout=timeout)
+
+    def wait(self, cond, t=30):
+        t0 = time.time()
+        while time.time() - t0 < t:
+            if cond():
+                return True
+            time.sleep(0.2)
+        return False
+
+    def test_start_stop_resume(self):
+        e = Env(debounce_seconds=0.5)
+        b = e.bridge_mod
+        try:
+            self.assertIn("ĐÃ TẮT", self.cli("status").stdout)
+            e.script("hang")
+            e.ask("hold.md", "[nhanh] Hold sau CTS?", age=5)
+            r = self.cli("start")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("ĐÃ BẬT", r.stdout)
+            self.assertTrue(b.watcher_running(e.home))
+            self.assertIn("ĐANG BẬT", self.cli("status").stdout)
+            self.assertIn("ĐANG BẬT sẵn", self.cli("start").stdout)         # bật 2 lần: không chạy 2 watcher
+            self.assertTrue(self.wait(lambda: len(e.calls()) >= 1), "claude chưa được gọi")
+            pid = e.calls()[0]["pid"]
+            self.assertTrue(alive(pid))
+            t0 = time.time()
+            r = self.cli("stop")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertLess(time.time() - t0, 15, "tắt phải nhanh dù đang trả lời dở")
+            self.assertIn("ĐÃ TẮT", r.stdout)
+            self.assertFalse(b.watcher_running(e.home))
+            self.assertTrue(self.wait(lambda: not alive(pid), 5), "claude đang chạy dở phải bị tắt")
+            self.assertTrue((e.home / "tat").exists())
+            self.assertIn("ĐÃ TẮT", (e.q / "_TRANG_THAI.md").read_text())
+            a = (e.q / "Q001_traloi.md").read_text()
+            self.assertNotIn("status=error", a)
+            # đã tắt: watcher (vd. Task Scheduler cũ) không được tự chạy lại
+            r = self.cli("watch", timeout=20)
+            self.assertEqual(r.returncode, 0)
+            self.assertFalse(b.watcher_running(e.home))
+            self.assertEqual(len(e.calls()), 1)
+            # bật lại: câu dở dang được trả lời tiếp
+            e.script("ok")
+            self.assertEqual(self.cli("start").returncode, 0)
+            self.assertFalse((e.home / "tat").exists())
+            self.assertTrue(self.wait(lambda: "status=done" in (e.q / "Q001_traloi.md").read_text(), 40),
+                            (e.q / "Q001_traloi.md").read_text()[-600:])
+            self.assertEqual(self.cli("stop").returncode, 0)
+            self.assertFalse(b.watcher_running(e.home))
+            self.assertIn("ĐÃ TẮT", self.cli("stop").stdout)                 # tắt khi đã tắt: vẫn OK
+        finally:
+            self.cli("stop")
+            e.cleanup()
+
+    def test_idle_auto_stop(self):
+        e = Env(idle_stop_minutes=0.03)
+        try:
+            p = subprocess.Popen([sys.executable, str(TOOLS / "bridge.py"), "watch"], env=os.environ,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            p.wait(timeout=30)
+            self.assertEqual(p.returncode, 0)
+            self.assertTrue((e.home / "tat").exists())
+            self.assertIn("tự tắt", (e.q / "_TRANG_THAI.md").read_text())
+        finally:
+            e.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

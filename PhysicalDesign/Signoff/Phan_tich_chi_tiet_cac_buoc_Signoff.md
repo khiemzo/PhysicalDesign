@@ -580,7 +580,7 @@ Chỉ số chính: **WNS** (worst negative slack), **TNS** (total negative slack
   u_core/u_alu/acc_reg_12_/CP (DFFQ_X1)                  0.0310                0.0000   0.3820 r
   u_core/u_alu/acc_reg_12_/Q  (DFFQ_X1)                  0.0450  1.080         0.0960   0.4780 r
   ...  (6 tầng logic, mỗi tầng 60–90 ps)                                                 ...
-  u_core/U1234/ZN (NR2_X1)                               0.1850  1.080  0.0240 0.1310 * 1.0340 f
+  u_core/U1234/ZN (NR2_X1)                               0.1850  1.080  0.0240 0.1310 & 1.0340 f
   u_core/n5678 (net)                       18   0.0420
   ...  (3 tầng tiếp theo, mỗi tầng 70–100 ps)                                           ...
   u_core/u_lsu/addr_reg_30_/D (DFFQ_X1)                  0.0620                         1.3120 f
@@ -615,7 +615,7 @@ Chỉ số chính: **WNS** (worst negative slack), **TNS** (total negative slack
 
 **Phân tích data path:**
 
-- Tầng `U1234 (NR2_X1)` lái **fanout 18, 42 fF**, transition 185 ps → incr 131 ps (trong đó delta SI 24 ps). Đây là "điểm nóng" chiếm ~14% data path; dấu `*` cho biết giá trị có annotate SI.
+- Tầng `U1234 (NR2_X1)` lái **fanout 18, 42 fF**, transition 185 ps → incr 131 ps (trong đó delta SI 24 ps). Đây là "điểm nóng" chiếm ~14% data path. (Ký tự cạnh giá trị Incr, ví dụ `&` trong PrimeTime, cho biết nguồn gốc của giá trị delay — thường là tính từ parasitic chi tiết; ý nghĩa chính xác xem legend/`man report_timing`. Phần crosstalk nằm ở cột Delta.)
 - 10 tầng logic cho 1 GHz ở SSG là hợp lý, các tầng khác có delay bình thường → **không phải** vấn đề logic depth.
 - Skew −41 ps: kiểm tra capture flop có nằm trên nhánh clock ngắn bất thường không (so latency trung bình của nhóm flop `addr_reg_*`).
 
